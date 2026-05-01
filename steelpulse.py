@@ -525,6 +525,70 @@ def run_forecast(df):
 # ─────────────────────────────────────────────────────────────────
 # STEP 5 — FULL PIPELINE
 # ─────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────
+# SWAGELOK DECISION MATRIX ENGINE
+# ─────────────────────────────────────────────────────────────────
+def apply_decision_matrix(df):
+    """
+    Implements Swagelok's official Decision Matrix (from internal slide):
+
+    Definitions:
+      Quotation High  = inquiry qty in past 12 months > 100 pcs
+      PO Received High = sales / inquiry conversion > 50% (past 12M)
+      Stock High      = net stock / sales_12M > 50% (adequate cover)
+
+    Rules:
+      High Q + High PO + Low Stock  → BUY      (strong demand, need stock now)
+      High Q + High PO + High Stock → MONITOR  (well stocked, watch)
+      Low  Q + Low  PO + High Stock → HOLD     (weak demand, enough stock)
+      High Q + Low  PO + Low Stock  → BUY*     (high interest, buy + review)
+      Low  Q + Low  PO + Low Stock  → DROP     (discontinue or review)
+      High Q + Low  PO + High Stock → REVIEW   (defer buying, monitor interest)
+    """
+    MONTHS_2026 = 4  # Jan-Apr complete as of May 2026
+
+    df = df.copy()
+
+    # Past 12 months = 2025 full + 2026 annualised
+    df['Inq_12M']   = df['Inq_2025']   + df['Inq_2026']   * (12 / MONTHS_2026)
+    df['Sales_12M'] = df['Sales_2025'] + df['Sales_2026'] * (12 / MONTHS_2026)
+
+    # Quotation: High = > 100 pcs in past 12 months
+    df['Q_High']   = df['Inq_12M'] >= 100
+
+    # PO Received: High = conversion rate > 50%
+    df['Conv_12M'] = df['Sales_12M'] / (df['Inq_12M'] + 1e-9)
+    df['PO_High']  = df['Conv_12M'] >= 0.50
+
+    # Stock Availability: High = net stock covers > 50% of 12M sales demand
+    df['Stock_Ratio'] = df['NetAvailStock'] / (df['Sales_12M'] + 1e-9)
+    df['Stock_High']  = df['Stock_Ratio'].clip(-1e9, 1e9) >= 0.50
+
+    def _dm(row):
+        Q = bool(row['Q_High'])
+        P = bool(row['PO_High'])
+        S = bool(row['Stock_High'])
+        if     Q and     P and not S: return 'BUY',     '#28a745', 'Strong demand + confirmed orders + low stock → immediate replenishment required'
+        if     Q and     P and     S: return 'MONITOR', '#007bff', 'Strong & steady demand with adequate stock → maintain watch, no immediate action'
+        if not Q and not P and     S: return 'HOLD',    '#856404', 'Weak demand + sufficient stock → avoid replenishment, review with Sales & Costing'
+        if     Q and not P and not S: return 'BUY',     '#fd7e14', 'High quotation + weak conversion + low stock → buy and review with Sales & Costing'
+        if not Q and not P and not S: return 'DROP',    '#dc3545', 'No active demand or orders + low stock → discontinue or review with Sales'
+        if     Q and not P and     S: return 'REVIEW',  '#6f42c1', 'High quotation + weak conversion + healthy stock → monitor interest, defer buying'
+        return 'HOLD', '#856404', 'Insufficient data'
+
+    dm_results = df.apply(_dm, axis=1, result_type='expand')
+    dm_results.columns = ['DM_Action', 'DM_Color', 'DM_Reason']
+    df = pd.concat([df, dm_results], axis=1)
+
+    # Quotation/PO/Stock labels for display
+    df['Q_Label']     = df['Q_High'].map({True: 'High', False: 'Low'})
+    df['PO_Label']    = df['PO_High'].map({True: 'High', False: 'Low'})
+    df['Stock_Label'] = df['Stock_High'].map({True: 'High', False: 'Low'})
+
+    return df
+
+
 @st.cache_data(show_spinner=False)
 def run_full_analysis(file_bytes, filename):
     buf    = io.BytesIO(file_bytes)
@@ -532,6 +596,8 @@ def run_full_analysis(file_bytes, filename):
     master = build_master(data)
     scored = run_algorithm(master)
     result = run_forecast(scored)
+    # Apply Swagelok Decision Matrix
+    result = apply_decision_matrix(result)
     # Apply learned correction factors if available
     if is_bootstrapped():
         corrections = get_correction_factors()
@@ -1143,140 +1209,162 @@ def _show_learning_dashboard(result_df):
 # ─────────────────────────────────────────────────────────────────
 def _procurement_board_filter(df):
     """
-    Apply the 3 business conditions to identify real buy candidates.
-
-    Condition 1: HIGH INQUIRY
-        → Item must have inquiry >= 100 in at least 3 of the 6 years
-        → Means customer market is consistently interested
-
-    Condition 2: INQUIRY VOLUME
-        → Total inquiry across all years must be >= 100
-        → Filters out items with one-off tiny inquiries
-
-    Condition 3: LOW STOCK → NEED TO BUY
-        → Net available stock < 500 lengths
-        → Only buy if stock is running low
-
-    Condition 4: CONSISTENT SALES
-        → Sales recorded in at least 3 of 6 years
-        → Proves real consumption, not just inquiry noise
+    Uses Swagelok Decision Matrix as primary filter.
+    Shows BUY + REVIEW items sorted by 12-month inquiry volume.
+    Also adds legacy conditions as additional context columns.
     """
     YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
-
     df = df.copy()
     df['_inq_years_100plus'] = (df[[f'Inq_{y}' for y in YEARS]] >= 100).sum(axis=1)
     df['_total_inq']         = df[[f'Inq_{y}' for y in YEARS]].sum(axis=1)
     df['_sales_years_active']= (df[[f'Sales_{y}' for y in YEARS]] > 0).sum(axis=1)
-    df['_inq_years_active']  = (df[[f'Inq_{y}' for y in YEARS]] > 0).sum(axis=1)
 
-    cond1 = df['_inq_years_100plus'] >= 3   # 3+ years with inq >= 100
-    cond2 = df['_total_inq']         >= 100  # total inquiry meaningful
-    cond3 = df['NetAvailStock']       < 500  # stock below threshold
-    cond4 = df['_sales_years_active'] >= 3   # consistent sales
+    # Primary: use Decision Matrix
+    if 'DM_Action' in df.columns:
+        board = df[df['DM_Action'].isin(['BUY','MONITOR','REVIEW'])].copy()
+    else:
+        # Fallback to original conditions
+        cond1 = df['_inq_years_100plus'] >= 3
+        cond2 = df['_total_inq']         >= 100
+        cond3 = df['NetAvailStock']       < 500
+        cond4 = df['_sales_years_active'] >= 3
+        board = df[cond1 & cond2 & cond3 & cond4].copy()
 
-    board = df[cond1 & cond2 & cond3 & cond4].copy()
-    board = board.sort_values('_total_inq', ascending=False)
+    board = board.sort_values('Inq_12M' if 'Inq_12M' in board.columns else '_total_inq',
+                              ascending=False)
     return board
 
 
 def _show_procurement_board(df):
     YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
 
-    st.markdown("#### 🎯 Procurement Board")
+    st.markdown("#### 🎯 Procurement Board — Swagelok Decision Matrix")
+
+    # Matrix legend
     st.markdown("""
-    <div style="background:#1A1A2E;border-radius:8px;padding:14px 18px;margin-bottom:16px">
-    <div style="color:#f0a500;font-weight:700;font-size:13px;margin-bottom:8px">
-    📋 Items shown here meet ALL 4 conditions:
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:#ccc">
-      <div>✅ <b>Condition 1:</b> Inquiry ≥ 100 in 3+ of 6 years (consistent market demand)</div>
-      <div>✅ <b>Condition 2:</b> Total inquiry across all years ≥ 100 (meaningful volume)</div>
-      <div>✅ <b>Condition 3:</b> Net stock &lt; 500 lengths (running low — need to buy)</div>
-      <div>✅ <b>Condition 4:</b> Sales recorded in 3+ years (proven real consumption)</div>
-    </div>
+    <div style="background:#1A1A2E;border-radius:8px;padding:16px 20px;margin-bottom:16px">
+      <div style="color:#f0a500;font-weight:700;font-size:13px;margin-bottom:10px">
+        📋 Swagelok Decision Matrix — Applied to Past 12 Months Data
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:11px;color:#ccc;margin-bottom:10px">
+        <div>📊 <b>Quotation:</b> High = inquiry &gt; 100 pcs (12M)</div>
+        <div>📦 <b>PO Received:</b> High = conversion &gt; 50%</div>
+        <div>🏭 <b>Stock:</b> High = net stock &gt; 50% of 12M sales</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px">
+        <div style="background:#28a74522;border:1px solid #28a745;border-radius:4px;padding:6px">
+          🟢 <b>BUY</b>: High Q + High PO + Low Stock<br>
+          <span style="color:#aaa">Immediate replenishment needed</span>
+        </div>
+        <div style="background:#28a74522;border:1px solid #fd7e14;border-radius:4px;padding:6px">
+          🟢 <b>BUY*</b>: High Q + Low PO + Low Stock<br>
+          <span style="color:#aaa">Buy + review with Sales & Costing</span>
+        </div>
+        <div style="background:#007bff22;border:1px solid #007bff;border-radius:4px;padding:6px">
+          🔵 <b>MONITOR</b>: High Q + High PO + High Stock<br>
+          <span style="color:#aaa">Watch only, no action</span>
+        </div>
+        <div style="background:#85640422;border:1px solid #856404;border-radius:4px;padding:6px">
+          🟡 <b>HOLD</b>: Low Q + Low PO + High Stock<br>
+          <span style="color:#aaa">Avoid buying, manage existing</span>
+        </div>
+        <div style="background:#6f42c122;border:1px solid #6f42c1;border-radius:4px;padding:6px">
+          👁️ <b>REVIEW</b>: High Q + Low PO + High Stock<br>
+          <span style="color:#aaa">Defer buying, monitor interest</span>
+        </div>
+        <div style="background:#dc354522;border:1px solid #dc3545;border-radius:4px;padding:6px">
+          ⛔ <b>DROP</b>: Low Q + Low PO + Low Stock<br>
+          <span style="color:#aaa">Discontinue or review with Sales</span>
+        </div>
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
     board = _procurement_board_filter(df)
 
-    if board.empty:
-        st.warning("No items meet all 4 conditions with current data.")
-        return
+    # KPIs
+    buy_items  = board[board.DM_Action=='BUY']   if 'DM_Action' in board.columns else board
+    mon_items  = board[board.DM_Action=='MONITOR'] if 'DM_Action' in board.columns else pd.DataFrame()
+    rev_items  = board[board.DM_Action=='REVIEW']  if 'DM_Action' in board.columns else pd.DataFrame()
 
-    # ── Summary KPIs ──
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.metric("Items to Review", len(board),
-                  help="Items meeting all 4 procurement conditions")
-    with k2:
-        st.metric("Total Proposed Buy",
-                  f"{int(board.ProposedQty_6M.sum()):,} lengths",
-                  help="Sum of proposed purchase quantities")
-    with k3:
-        urgent = board[board.NetAvailStock <= 0]
-        st.metric("🔴 Zero Stock Items", len(urgent),
-                  help="Items with nothing on hand right now")
-    with k4:
-        est = board.EstCostUSD.sum()
-        st.metric("Est. Total Cost",
-                  f"${est/1000:.0f}K USD" if est > 0 else "N/A",
-                  help="Estimated procurement cost (priced items only)")
+    k1,k2,k3,k4,k5 = st.columns(5)
+    with k1: st.metric("🟢 BUY",     len(buy_items),  help="Needs immediate procurement")
+    with k2: st.metric("🔵 MONITOR", len(mon_items),   help="Watch only")
+    with k3: st.metric("👁️ REVIEW",  len(rev_items),   help="High interest, defer buying")
+    with k4: st.metric("Total in View", len(board))
+    with k5:
+        qty = int(buy_items.ProposedQty_6M.sum()) if len(buy_items) > 0 else 0
+        st.metric("Proposed Buy Qty", f"{qty:,} lengths")
 
-    st.markdown("<div style='margin:10px 0'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
 
-    # ── Main board table ──
-    board_display = board[[
-        'ItemCode', '_inq_years_100plus', '_total_inq',
-        '_sales_years_active', 'TotalSales',
-        'NetAvailStock', 'QOH', 'IncomingPO', 'OpenSO',
-        'Signal', 'Score', 'ProposedQty_6M', 'F6M_Mid',
-        'StockoutMonth', 'LeadTimeWeeks'
-    ]].copy()
-
-    board_display.columns = [
-        'Item Code', 'Inq Years ≥100', 'Total Inquiry (6yr)',
-        'Sales Years Active', 'Total Sales (6yr)',
-        'Net Stock', 'QOH', 'Incoming PO', 'Open SO',
-        'Signal', 'Score', 'Proposed Buy (6M)', '6M Demand',
-        'Stockout Month', 'Lead Wks'
-    ]
-    board_display = board_display.round(0)
-
-    def _color_board(row):
-        net = row['Net Stock']
-        sig = row['Signal']
-        if net <= 0:
-            return ['background-color:#ffe5e5'] * len(row)
-        elif sig == 'BUY':
-            return ['background-color:#d4edda'] * len(row)
-        elif sig == 'WATCH':
-            return ['background-color:#e8f4ff'] * len(row)
-        return [''] * len(row)
-
-    st.dataframe(
-        board_display.set_index('Item Code').style.apply(_color_board, axis=1),
-        use_container_width=True,
-        height=420
+    # Filter tabs
+    view_filter = st.radio(
+        "Show items:",
+        ["🟢 BUY (action required)", "👁️ REVIEW (monitor)", "🔵 MONITOR", "All"],
+        horizontal=True, key="dm_filter"
     )
-    st.caption(
-        f"🔴 Red = zero stock · 🟢 Green = BUY signal · 🔵 Blue = WATCH · "
-        f"Showing {len(board)} items meeting all conditions"
-    )
+    if "BUY" in view_filter:
+        show_df = buy_items
+    elif "REVIEW" in view_filter:
+        show_df = rev_items
+    elif "MONITOR" in view_filter:
+        show_df = mon_items
+    else:
+        show_df = board
 
-    # ── Click item → full trend detail ──
+    if show_df.empty:
+        st.info("No items in this category.")
+    else:
+        # Build display table
+        disp_cols = {
+            'ItemCode':      'Item Code',
+            'DM_Action':     'Decision',
+            'Q_Label':       'Quotation',
+            'PO_Label':      'PO Received',
+            'Stock_Label':   'Stock Avail.',
+            'Inq_12M':       'Inquiry 12M',
+            'Conv_12M':      'Conv. Rate',
+            'Sales_12M':     'Sales 12M',
+            'NetAvailStock': 'Net Stock',
+            'ProposedQty_6M':'Proposed Buy',
+            'F6M_Mid':       '6M Demand',
+            'StockoutMonth': 'Stockout In',
+            'DM_Reason':     'Interpretation',
+        }
+        avail = [c for c in disp_cols if c in show_df.columns]
+        disp = show_df[avail].rename(columns=disp_cols).copy()
+        if 'Inquiry 12M' in disp.columns: disp['Inquiry 12M']  = disp['Inquiry 12M'].round(0).astype(int)
+        if 'Sales 12M'   in disp.columns: disp['Sales 12M']    = disp['Sales 12M'].round(0).astype(int)
+        if 'Conv. Rate'  in disp.columns: disp['Conv. Rate']   = (disp['Conv. Rate']*100).round(1).astype(str) + '%'
+        if 'Net Stock'   in disp.columns: disp['Net Stock']    = disp['Net Stock'].round(0).astype(int)
+        if 'Proposed Buy' in disp.columns: disp['Proposed Buy']= disp['Proposed Buy'].round(0).astype(int)
+        if '6M Demand'   in disp.columns: disp['6M Demand']    = disp['6M Demand'].round(1)
+
+        def _color_dm(row):
+            action = row.get('Decision','')
+            if action == 'BUY':     return ['background-color:#d4edda'] * len(row)
+            if action == 'MONITOR': return ['background-color:#cce5ff'] * len(row)
+            if action == 'REVIEW':  return ['background-color:#ede7f6'] * len(row)
+            if action == 'HOLD':    return ['background-color:#fff3cd'] * len(row)
+            return [''] * len(row)
+
+        st.dataframe(
+            disp.set_index('Item Code').style.apply(_color_dm, axis=1),
+            use_container_width=True, height=440
+        )
+        st.caption(f"Showing {len(show_df)} items · Based on past 12 months data (2025 + annualised 2026)")
+
+    # ── Item detail ──
     st.markdown("---")
-    st.markdown("#### 🔍 Item Detail — Sales Trend, Inquiry History & Stock Position")
-    st.caption("Select any item from the board above to see its full history")
+    st.markdown("#### 🔍 Item Detail — Click to Inspect")
 
-    selected = st.selectbox(
-        "Select item to inspect:",
-        board['ItemCode'].tolist(),
-        key="board_item_select"
-    )
-
-    if selected:
-        irow = df[df.ItemCode == selected].iloc[0]
-        _show_board_item_detail(irow, YEARS)
+    all_items = board['ItemCode'].tolist() if not board.empty else []
+    if all_items:
+        selected = st.selectbox("Select item:", all_items, key="board_item_select")
+        if selected:
+            irow = df[df.ItemCode == selected].iloc[0]
+            _show_board_item_detail(irow, YEARS)
 
 
 def _show_board_item_detail(row, YEARS):
@@ -2071,3 +2159,6 @@ def main():
 # ─────────────────────────────────────────────────────────────────
 # HELPER: Item detail panel
 # ─────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    main()
