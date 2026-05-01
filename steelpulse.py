@@ -1,0 +1,1430 @@
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║          SteelPulse — Procurement Intelligence Platform          ║
+║          Streamlit Single-File App  |  Version 2.0               ║
+║                                                                  ║
+║  ALGORITHM: Weighted Multi-Signal Procurement Scoring (WMSPS)   ║
+║  FORECAST:  Trend-Weighted Moving Average Projection (TWMAP)     ║
+╚══════════════════════════════════════════════════════════════════╝
+
+HOW TO RUN:
+    pip install streamlit pandas numpy openpyxl plotly scipy scikit-learn xlsxwriter
+    streamlit run steelpulse.py
+
+HOW TO USE:
+    1. Upload your SAP Excel export (.xlsx) in the sidebar
+    2. Algorithm runs automatically
+    3. Browse tabs: Dashboard → Forecast → 6-Month → Balance → Algorithm
+    4. Click any item row → see full detail
+    5. Export → download professional Excel report
+"""
+
+import io
+import math
+import calendar
+import warnings
+from datetime import date, datetime
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+from plotly.subplots import make_subplots
+
+warnings.filterwarnings("ignore")
+
+# ─────────────────────────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────────────────────────
+YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+YEAR_WEIGHTS = {2021: 0.40, 2022: 0.55, 2023: 0.70,
+                2024: 1.00, 2025: 1.50, 2026: 2.00}
+MONTHS_2026 = 4   # Jan–Apr complete as of May 2026
+
+SIGNAL_COLORS = {
+    "BUY":   "#28a745",
+    "WATCH": "#007bff",
+    "HOLD":  "#ffc107",
+    "SKIP":  "#dc3545",
+}
+CLASS_COLORS = {
+    "FAST_MOVER": "#28a745",
+    "SLOW_MOVER": "#007bff",
+    "PROJECT":    "#fd7e14",
+    "DEAD":       "#6c757d",
+}
+CONF_COLORS = {"HIGH": "#28a745", "MEDIUM": "#ffc107", "LOW": "#dc3545"}
+
+
+def _next_6_months():
+    today = date.today()
+    result = []
+    for i in range(1, 7):
+        m = today.month + i
+        y = today.year + (m - 1) // 12
+        m = ((m - 1) % 12) + 1
+        result.append(f"{calendar.month_abbr[m]}'{str(y)[2:]}")
+    return result
+
+
+MONTH_LABELS = _next_6_months()
+
+
+# ─────────────────────────────────────────────────────────────────
+# STEP 1 — EXCEL PARSER
+# ─────────────────────────────────────────────────────────────────
+def parse_excel(uploaded_file):
+    """Parse all relevant sheets from uploaded SAP Excel export."""
+    xl = pd.ExcelFile(uploaded_file)
+    sheets = xl.sheet_names
+    data = {}
+
+    # ── Quotation pivot ──
+    for sh in sheets:
+        raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
+        flat = " ".join(str(x) for x in raw.values.flatten())
+        if "Tubing Quotation Table" in flat or (
+            "Sum of Quantity" in flat and "Row Labels" in flat and "2021" in flat
+        ):
+            pv = _parse_pivot(raw)
+            if pv is not None and len(pv) > 5:
+                data["quotation_pivot"] = pv
+                break
+
+    # ── SO pivot ──
+    for sh in sheets:
+        if sh in ("SO-Table", "TSO Table", "Sheet2"):
+            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
+            pv = _parse_pivot(raw)
+            if pv is not None and len(pv) > 2:
+                data["so_pivot"] = pv
+                break
+
+    # ── Purchase pivot ──
+    for sh in sheets:
+        if sh in ("Purchase-Table", "TP History", "Sheet1"):
+            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
+            pv = _parse_pivot(raw)
+            if pv is not None and len(pv) > 2:
+                data["purchase_pivot"] = pv
+                break
+
+    # ── Stock balance ──
+    for sh in sheets:
+        raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
+        flat = " ".join(str(x) for x in raw.values.flatten())
+        if "01-QOH" in flat and "ItemCode" in flat:
+            data["stock"] = _parse_stock(raw)
+            break
+
+    # ── Pricing ──
+    for sh in sheets:
+        if "PRICE" in sh.upper() or "144" in sh:
+            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
+            data["pricing"] = _parse_pricing(raw)
+            break
+
+    # ── Master Sheet5 ──
+    for sh in sheets:
+        if sh == "Sheet5":
+            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
+            data["master_sheet"] = _parse_sheet5(raw)
+            break
+
+    return data
+
+
+def _parse_pivot(raw):
+    header_row = None
+    for i, row in raw.iterrows():
+        vals = row.dropna().astype(str).tolist()
+        if any(str(y) in vals for y in YEARS) or "Row Labels" in vals:
+            header_row = i
+            break
+    if header_row is None:
+        return None
+    df = raw.iloc[header_row:].reset_index(drop=True)
+    headers = df.iloc[0].tolist()
+    year_cols = {}
+    for ci, h in enumerate(headers):
+        try:
+            yr = int(float(str(h)))
+            if yr in YEARS:
+                year_cols[yr] = ci
+        except Exception:
+            pass
+    if not year_cols:
+        return None
+    records = []
+    for _, row in df.iloc[1:].iterrows():
+        item = str(row.iloc[0]).strip()
+        if not item or item in ("nan", "Grand Total", "Row Labels", "None"):
+            continue
+        rec = {"ItemCode": item}
+        for yr, ci in year_cols.items():
+            val = row.iloc[ci]
+            rec[yr] = float(val) if pd.notna(val) else 0.0
+        records.append(rec)
+    return pd.DataFrame(records) if records else None
+
+
+def _parse_stock(raw):
+    hdr_row = None
+    for i, row in raw.iterrows():
+        if "01-QOH" in row.astype(str).values:
+            hdr_row = i
+            break
+    if hdr_row is None:
+        return None
+    df = raw.iloc[hdr_row:].reset_index(drop=True)
+    df.columns = df.iloc[0]
+    df = df.iloc[1:].reset_index(drop=True)
+    df.columns = df.columns.astype(str).str.strip()
+    keep = ["ItemCode", "Item Cost", "01-QOH", "Consignment",
+            "01-Open SO", "01-Avail Stock", "01 PO", "01-Net Avail Stock"]
+    available = [c for c in keep if c in df.columns]
+    df = df[available].copy()
+    df["ItemCode"] = df["ItemCode"].astype(str).str.strip()
+    df = df[df["ItemCode"].notna() & (df["ItemCode"] != "nan") & (df["ItemCode"] != "")]
+    for c in [x for x in df.columns if x != "ItemCode"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    return df
+
+
+def _parse_pricing(raw):
+    df = raw.copy()
+    df.columns = df.iloc[0].astype(str).str.strip()
+    df = df.iloc[1:].reset_index(drop=True)
+    rename = {}
+    for c in df.columns:
+        cl = c.lower().replace("\n", " ")
+        if "swagelok" in cl or "p/n" in cl:
+            rename[c] = "ItemCode"
+        elif "unit price" in cl:
+            rename[c] = "UnitPriceUSD_mtr"
+        elif "lead time" in cl and "week" in cl:
+            rename[c] = "LeadTimeWeeks"
+        elif "uom" in cl or ("length" in cl and "uom" in cl):
+            rename[c] = "PricePerLength"
+        elif "ex-mill" in cl or "ex mill" in cl:
+            rename[c] = "Origin"
+    df = df.rename(columns=rename)
+    if "ItemCode" not in df.columns:
+        return None
+    df["ItemCode"] = df["ItemCode"].astype(str).str.strip()
+    df = df[df["ItemCode"].notna() & (df["ItemCode"] != "nan")]
+    for c in ["UnitPriceUSD_mtr", "LeadTimeWeeks", "PricePerLength"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    return df
+
+
+def _parse_sheet5(raw):
+    hdr_idx = None
+    for i, row in raw.iterrows():
+        if any("2021" in str(v) for v in row):
+            hdr_idx = i
+            break
+    if hdr_idx is None:
+        return None
+    records = []
+    for _, row in raw.iloc[hdr_idx + 1:].iterrows():
+        item = str(row.iloc[1]).strip()
+        if not item or item in ("nan", "None", "Grand Total"):
+            continue
+        rec = {"ItemCode": item}
+        try:
+            rec["NetAvail_manual"] = float(row.iloc[26]) if pd.notna(row.iloc[26]) else 0
+            rec["ProposedQty_manual"] = float(row.iloc[27]) if pd.notna(row.iloc[27]) else 0
+            rec["UnitPrice_sheet5"] = float(row.iloc[29]) if pd.notna(row.iloc[29]) else 0
+        except Exception:
+            pass
+        records.append(rec)
+    return pd.DataFrame(records) if records else None
+
+
+# ─────────────────────────────────────────────────────────────────
+# STEP 2 — BUILD MASTER TABLE
+# ─────────────────────────────────────────────────────────────────
+def build_master(data):
+    all_items = set()
+    for key in ["quotation_pivot", "so_pivot", "purchase_pivot"]:
+        if key in data and data[key] is not None:
+            all_items.update(data[key]["ItemCode"].tolist())
+    if "stock" in data and data["stock"] is not None:
+        all_items.update(data["stock"]["ItemCode"].tolist())
+    all_items = {i for i in all_items if i and i != "nan" and len(i) > 3}
+
+    rows = []
+    for item in sorted(all_items):
+        row = {"ItemCode": item}
+        for key, prefix in [("quotation_pivot", "Inq"), ("so_pivot", "Sales"), ("purchase_pivot", "Purch")]:
+            df = data.get(key)
+            for yr in YEARS:
+                col = f"{prefix}_{yr}"
+                if df is not None and yr in df.columns:
+                    match = df[df["ItemCode"] == item]
+                    row[col] = float(match[yr].sum()) if not match.empty else 0.0
+                else:
+                    row[col] = 0.0
+
+        st = data.get("stock")
+        if st is not None:
+            m = st[st["ItemCode"] == item]
+            row["QOH"]          = float(m["01-QOH"].iloc[0])          if not m.empty and "01-QOH"          in m.columns else 0
+            row["OpenSO"]       = float(m["01-Open SO"].iloc[0])       if not m.empty and "01-Open SO"      in m.columns else 0
+            row["AvailStock"]   = float(m["01-Avail Stock"].iloc[0])   if not m.empty and "01-Avail Stock"  in m.columns else 0
+            row["IncomingPO"]   = float(m["01 PO"].iloc[0])            if not m.empty and "01 PO"           in m.columns else 0
+            row["NetAvailStock"]= float(m["01-Net Avail Stock"].iloc[0])if not m.empty and "01-Net Avail Stock" in m.columns else 0
+            row["ItemCost"]     = float(m["Item Cost"].iloc[0])         if not m.empty and "Item Cost"       in m.columns else 0
+        else:
+            for f in ["QOH","OpenSO","AvailStock","IncomingPO","NetAvailStock","ItemCost"]:
+                row[f] = 0
+
+        pr = data.get("pricing")
+        if pr is not None:
+            m = pr[pr["ItemCode"] == item]
+            row["UnitPriceUSD_mtr"] = float(m["UnitPriceUSD_mtr"].iloc[0]) if not m.empty and "UnitPriceUSD_mtr" in m.columns else 0
+            row["LeadTimeWeeks"]    = float(m["LeadTimeWeeks"].iloc[0])     if not m.empty and "LeadTimeWeeks"    in m.columns else 8
+            row["PricePerLength"]   = float(m["PricePerLength"].iloc[0])    if not m.empty and "PricePerLength"   in m.columns else 0
+            row["Origin"]           = str(m["Origin"].iloc[0])              if not m.empty and "Origin"           in m.columns else ""
+        else:
+            row["UnitPriceUSD_mtr"] = 0; row["LeadTimeWeeks"] = 8
+            row["PricePerLength"] = 0;   row["Origin"] = ""
+
+        ms = data.get("master_sheet")
+        if ms is not None:
+            m = ms[ms["ItemCode"] == item]
+            row["ProposedQty_manual"] = float(m["ProposedQty_manual"].iloc[0]) if not m.empty and "ProposedQty_manual" in m.columns else np.nan
+        else:
+            row["ProposedQty_manual"] = np.nan
+
+        rows.append(row)
+
+    master = pd.DataFrame(rows).fillna(0)
+    return master
+
+
+# ─────────────────────────────────────────────────────────────────
+# STEP 3 — WMSPS ALGORITHM
+# ─────────────────────────────────────────────────────────────────
+def run_algorithm(master):
+    df = master.copy()
+
+    # Weighted average sales
+    df["WeightedAvgSales"] = sum(df[f"Sales_{y}"] * YEAR_WEIGHTS[y] for y in YEARS) / sum(YEAR_WEIGHTS.values())
+    df["AvgMonthlySales"]  = df["WeightedAvgSales"] / 12
+    df["TotalInquiry"]     = df[[f"Inq_{y}"   for y in YEARS]].sum(axis=1)
+    df["TotalSales"]       = df[[f"Sales_{y}" for y in YEARS]].sum(axis=1)
+    df["TotalPurchase"]    = df[[f"Purch_{y}" for y in YEARS]].sum(axis=1)
+    df["RecentSales"]      = df["Sales_2025"] + df["Sales_2026"]
+    df["RecentInquiry"]    = df["Inq_2025"]   + df["Inq_2026"]
+
+    # ── S1: Sales Velocity (35%) ──
+    def _s1(row):
+        vals = np.array([row[f"Sales_{y}"] for y in YEARS], dtype=float)
+        if vals.sum() == 0:
+            return 0.0
+        w = np.array([YEAR_WEIGHTS[y] for y in YEARS])
+        x = np.arange(len(YEARS), dtype=float)
+        xm = np.average(x, weights=w); ym = np.average(vals, weights=w)
+        slope = np.sum(w*(x-xm)*(vals-ym)) / (np.sum(w*(x-xm)**2) + 1e-9)
+        avg = vals[vals > 0].mean() if (vals > 0).any() else 1
+        score = min(100, max(0, 50 + (slope/(avg+1e-9))*50))
+        if row["RecentSales"] > 0: score = min(100, score + 15)
+        return round(score, 1)
+
+    # ── S2: Inquiry Conversion (25%) ──
+    def _s2(row):
+        if row["TotalInquiry"] == 0: return 0.0
+        conv = min(1.0, row["TotalSales"] / (row["TotalInquiry"] + 1e-9))
+        boost = min(30, (row["RecentInquiry"] / 100) * 10)
+        return round(min(100, conv * 100 + boost), 1)
+
+    # ── S3: Stock Coverage (25%) ──
+    def _s3(row):
+        avg = row["AvgMonthlySales"]
+        if avg <= 0:
+            return 0 if row["NetAvailStock"] > 0 else 50
+        net = row["NetAvailStock"] if row["NetAvailStock"] != 0 else row["AvailStock"]
+        cov = net / (avg + 1e-9)
+        lead = row["LeadTimeWeeks"] / 4.0
+        if cov <= 0:         return 100
+        elif cov < lead:     return 95
+        elif cov < lead + 1: return 80
+        elif cov < 3:        return 60
+        elif cov < 6:        return 30
+        else:                return 5
+
+    # ── S4: Open SO Pressure (15%) ──
+    def _s4(row):
+        if row["OpenSO"] <= 0: return 0.0
+        uncov = max(0, row["OpenSO"] - max(0, row["AvailStock"]))
+        return round(min(100, (uncov / (row["OpenSO"] + 1e-9)) * 100), 1)
+
+    df["S1_Velocity"]   = df.apply(_s1, axis=1)
+    df["S2_Conversion"] = df.apply(_s2, axis=1)
+    df["S3_Coverage"]   = df.apply(_s3, axis=1)
+    df["S4_OpenSO"]     = df.apply(_s4, axis=1)
+    df["Score"] = (df["S1_Velocity"]*0.35 + df["S2_Conversion"]*0.25 +
+                   df["S3_Coverage"]*0.25 + df["S4_OpenSO"]*0.15).round(1)
+
+    # ── Item Classification ──
+    def _classify(row):
+        sales = [row[f"Sales_{y}"] for y in YEARS]
+        nz = sum(1 for v in sales if v > 0)
+        total = sum(sales)
+        if total == 0 and row["TotalInquiry"] < 3: return "DEAD"
+        if nz <= 2 and total > 0:
+            mx = max(sales)
+            if mx > 0 and (total / mx) < 1.5: return "PROJECT"
+        if nz >= 3: return "FAST_MOVER"
+        if 1 <= nz < 3: return "SLOW_MOVER"
+        return "DEAD"
+
+    df["ItemClass"] = df.apply(_classify, axis=1)
+
+    # ── Signal ──
+    def _signal(row):
+        if row["ItemClass"] == "DEAD": return "SKIP"
+        s = row["Score"]
+        if s >= 60: return "BUY"
+        elif s >= 40: return "WATCH"
+        elif s >= 20: return "HOLD"
+        else: return "SKIP"
+
+    df["Signal"] = df.apply(_signal, axis=1)
+    df.loc[(df["OpenSO"] > df["AvailStock"]) & (df["TotalSales"] > 0), "Signal"] = "BUY"
+
+    # ── Stock cover days ──
+    def _cover(row):
+        if row["AvgMonthlySales"] <= 0: return 9999
+        net = row["NetAvailStock"] if row["NetAvailStock"] != 0 else row["AvailStock"]
+        return round(max(0, net / row["AvgMonthlySales"] * 30), 0)
+
+    df["StockCoverDays"] = df.apply(_cover, axis=1)
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────
+# STEP 4 — TWMAP 6-MONTH FORECAST
+# ─────────────────────────────────────────────────────────────────
+def run_forecast(df):
+    RECENCY = {2021:0.40,2022:0.55,2023:0.70,2024:1.00,2025:1.50,2026:2.00}
+    DECAY   = [1.00,0.98,0.96,0.94,0.92,0.90]
+
+    records = []
+    for _, row in df.iterrows():
+        sales = {y: float(row.get(f"Sales_{y}", 0) or 0) for y in YEARS}
+        inq   = {y: float(row.get(f"Inq_{y}",   0) or 0) for y in YEARS}
+        # Annualise partial 2026
+        if MONTHS_2026 > 0:
+            sales[2026] = sales[2026] * (12.0 / MONTHS_2026)
+            inq[2026]   = inq[2026]   * (12.0 / MONTHS_2026)
+
+        total_sales = sum(sales.values())
+
+        if total_sales == 0 and sum(inq.values()) < 3:
+            rec = {f"Proj_Mid_{m}": 0.0 for m in MONTH_LABELS}
+            rec.update({f"Proj_Low_{m}":  0.0 for m in MONTH_LABELS})
+            rec.update({f"Proj_High_{m}": 0.0 for m in MONTH_LABELS})
+            rec.update({"F6M_Low":0,"F6M_Mid":0,"F6M_High":0,
+                        "NetStock_Now":float(row.get("QOH",0) or 0),
+                        "StockEnd_Mid":float(row.get("QOH",0) or 0),
+                        "StockEnd_Worst":float(row.get("QOH",0) or 0),
+                        "ProposedQty_6M":0,"SafetyBuffer":0,
+                        "StockoutMonth":"None","HasStockoutRisk":False,
+                        "BaseMonthlySales":0,"TrendMult":1.0,"InqBoost":1.0,
+                        "ForecastConf":"LOW"})
+            records.append(rec)
+            continue
+
+        # Base monthly
+        active = [y for y in YEARS if sales[y] > 0]
+        if active:
+            base_annual = (sum(sales[y]*RECENCY[y] for y in active) /
+                           sum(RECENCY[y] for y in active))
+        else:
+            base_annual = 0
+        base_monthly = base_annual / 12.0
+
+        # Trend multiplier
+        recent2 = sales[2025] + sales[2026]
+        prior2  = sales[2023] + sales[2024]
+        if prior2 > 0 and recent2 > 0:
+            trend = max(0.50, min(2.00, recent2 / prior2))
+        elif recent2 > 0:  trend = 1.20
+        elif prior2 > 0:   trend = 0.50
+        else:              trend = 1.00
+
+        # Inquiry boost
+        avg_inq = sum(inq.values()) / 6.0
+        recent_inq = inq[2025] + inq[2026]
+        inq_boost = max(0.80, min(1.50, (recent_inq/2.0)/(avg_inq+1e-9))) if avg_inq > 0 else 1.0
+
+        # Monthly projections
+        mid_vals  = [round(base_monthly*trend*inq_boost*DECAY[i], 2) for i in range(6)]
+        low_vals  = [round(v*0.75, 2) for v in mid_vals]
+        high_vals = [round(v*1.30, 2) for v in mid_vals]
+
+        f6m_mid  = round(sum(mid_vals),  1)
+        f6m_low  = round(sum(low_vals),  1)
+        f6m_high = round(sum(high_vals), 1)
+
+        qoh     = float(row.get("QOH",0) or 0)
+        inc     = float(row.get("IncomingPO",0) or 0)
+        oso     = float(row.get("OpenSO",0) or 0)
+        net     = max(0, qoh + inc - oso)
+        safety  = round(mid_vals[0], 1) if mid_vals else 0
+        proposed = max(0, round(f6m_mid + safety - net, 0))
+
+        # Stockout month
+        running = net
+        stockout = "None"
+        for i, mv in enumerate(mid_vals):
+            running -= mv
+            if running < 0:
+                stockout = MONTH_LABELS[i]
+                break
+
+        nz_yrs = sum(1 for y in YEARS if sales[y] > 0)
+        conf = "HIGH" if nz_yrs >= 4 else ("MEDIUM" if nz_yrs >= 2 else "LOW")
+
+        rec = {f"Proj_Mid_{m}":  mid_vals[i]  for i, m in enumerate(MONTH_LABELS)}
+        rec.update({f"Proj_Low_{m}":  low_vals[i]  for i, m in enumerate(MONTH_LABELS)})
+        rec.update({f"Proj_High_{m}": high_vals[i] for i, m in enumerate(MONTH_LABELS)})
+        rec.update({
+            "F6M_Low": f6m_low, "F6M_Mid": f6m_mid, "F6M_High": f6m_high,
+            "NetStock_Now": round(net, 1),
+            "StockEnd_Mid":   round(net - f6m_mid,  1),
+            "StockEnd_Worst": round(net - f6m_high, 1),
+            "ProposedQty_6M": proposed, "SafetyBuffer": safety,
+            "StockoutMonth": stockout,
+            "HasStockoutRisk": stockout != "None",
+            "BaseMonthlySales": round(base_monthly, 2),
+            "TrendMult": round(trend, 3),
+            "InqBoost":  round(inq_boost, 3),
+            "ForecastConf": conf,
+        })
+        records.append(rec)
+
+    fc_df = pd.DataFrame(records).reset_index(drop=True)
+    result = pd.concat([df.reset_index(drop=True), fc_df], axis=1)
+    result["ProposedQty"] = result["ProposedQty_6M"]
+    result["EstCostUSD"]  = (result["ProposedQty"] * result["PricePerLength"]).round(2)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────
+# STEP 5 — FULL PIPELINE
+# ─────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def run_full_analysis(file_bytes, filename):
+    buf = io.BytesIO(file_bytes)
+    data   = parse_excel(buf)
+    master = build_master(data)
+    scored = run_algorithm(master)
+    result = run_forecast(scored)
+    return result
+
+
+def compute_summary(df):
+    return {
+        "total": len(df),
+        "buy":   int((df.Signal=="BUY").sum()),
+        "watch": int((df.Signal=="WATCH").sum()),
+        "hold":  int((df.Signal=="HOLD").sum()),
+        "skip":  int((df.Signal=="SKIP").sum()),
+        "dead":  int((df.ItemClass=="DEAD").sum()),
+        "fast":  int((df.ItemClass=="FAST_MOVER").sum()),
+        "slow":  int((df.ItemClass=="SLOW_MOVER").sum()),
+        "project": int((df.ItemClass=="PROJECT").sum()),
+        "stockout_risk": int(df.HasStockoutRisk.sum()),
+        "proposed_qty":  int(df.ProposedQty_6M.sum()),
+        "est_cost_usd":  round(float(df.EstCostUSD.sum()), 2),
+        "annual": {
+            yr: {
+                "inq":   int(df[f"Inq_{yr}"].sum()),
+                "sales": int(df[f"Sales_{yr}"].sum()),
+                "purch": int(df[f"Purch_{yr}"].sum()),
+            } for yr in YEARS
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────────
+# STEP 6 — EXCEL EXPORT
+# ─────────────────────────────────────────────────────────────────
+def build_excel_export(df):
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        wb = writer.book
+
+        # Formats
+        hdr_fmt  = wb.add_format({"bold":True,"bg_color":"#1A1A2E","font_color":"#FFFFFF","border":1,"align":"center","valign":"vcenter","text_wrap":True})
+        buy_fmt  = wb.add_format({"bold":True,"bg_color":"#d4edda","font_color":"#155724","border":1,"align":"center"})
+        watch_fmt= wb.add_format({"bold":True,"bg_color":"#cce5ff","font_color":"#004085","border":1,"align":"center"})
+        hold_fmt = wb.add_format({"bold":True,"bg_color":"#fff3cd","font_color":"#856404","border":1,"align":"center"})
+        skip_fmt = wb.add_format({"bold":True,"bg_color":"#f8d7da","font_color":"#721c24","border":1,"align":"center"})
+        cell_fmt = wb.add_format({"border":1,"align":"center","valign":"vcenter"})
+        money_fmt= wb.add_format({"border":1,"align":"center","num_format":"$#,##0.00"})
+        title_fmt= wb.add_format({"bold":True,"font_size":14,"font_color":"#1A1A2E"})
+        red_fmt  = wb.add_format({"bold":True,"bg_color":"#ffe5e5","font_color":"#cc0000","border":1,"align":"center"})
+        grn_fmt  = wb.add_format({"bold":True,"bg_color":"#d4edda","font_color":"#155724","border":1,"align":"center"})
+
+        sig_fmts = {"BUY":buy_fmt,"WATCH":watch_fmt,"HOLD":hold_fmt,"SKIP":skip_fmt}
+
+        def write_headers(ws, headers, row=0):
+            for ci, h in enumerate(headers):
+                ws.write(row, ci, h, hdr_fmt)
+
+        def sig_fmt(s):
+            return sig_fmts.get(s, cell_fmt)
+
+        # ── Sheet 1: Executive Summary ──
+        ws = wb.add_worksheet("Executive Summary")
+        ws.write(0, 0, "🔩 SteelPulse — Procurement Intelligence Report", title_fmt)
+        ws.write(1, 0, f"Generated: {datetime.now().strftime('%d %B %Y %H:%M')}")
+        summary = compute_summary(df)
+        kpi_data = [
+            ("Total Items", summary["total"]),
+            ("BUY Signals", summary["buy"]),
+            ("WATCH Signals", summary["watch"]),
+            ("Stockout Risk Items", summary["stockout_risk"]),
+            ("Proposed Buy Qty (lengths)", summary["proposed_qty"]),
+            ("Est. Total Cost (USD)", f"${summary['est_cost_usd']:,.0f}"),
+        ]
+        for ci, (label, val) in enumerate(kpi_data):
+            ws.write(3, ci, label, hdr_fmt)
+            ws.write(4, ci, val, cell_fmt)
+            ws.set_column(ci, ci, 22)
+
+        yr_hdrs = ["Year","Inquiries","Sales (lengths)","Purchases (lengths)","Conv. Rate %"]
+        write_headers(ws, yr_hdrs, row=6)
+        for ri, yr in enumerate(YEARS, 7):
+            d = summary["annual"][yr]
+            conv = round(d["sales"]/(d["inq"]+1)*100, 1) if d["inq"] > 0 else 0
+            for ci, v in enumerate([yr, d["inq"], d["sales"], d["purch"], conv]):
+                ws.write(ri, ci, v, cell_fmt)
+
+        # ── Sheet 2: Buy List ──
+        buy_df = df[df.Signal.isin(["BUY","WATCH"])].sort_values("Score", ascending=False)
+        ws2 = wb.add_worksheet("Buy List")
+        ws2.write(0, 0, "🛒 Procurement Buy List", title_fmt)
+        hdrs2 = ["Item Code","Class","Signal","Score","S1 Vel","S2 Conv","S3 Cov","S4 SO",
+                 "Net Stock","Open SO","Avail","Incoming PO","Proposed Qty (6M)",
+                 "6M Demand Mid","Stockout Month","Lead Wks","Price/Len","Est Cost USD","Origin"]
+        write_headers(ws2, hdrs2, row=1)
+        ws2.freeze_panes(2, 0)
+        ws2.autofilter(1, 0, 1, len(hdrs2)-1)
+        cols2 = ["ItemCode","ItemClass","Signal","Score","S1_Velocity","S2_Conversion",
+                 "S3_Coverage","S4_OpenSO","NetStock_Now","OpenSO","AvailStock","IncomingPO",
+                 "ProposedQty_6M","F6M_Mid","StockoutMonth","LeadTimeWeeks",
+                 "PricePerLength","EstCostUSD","Origin"]
+        for ri, (_, row) in enumerate(buy_df.iterrows(), 2):
+            for ci, col in enumerate(cols2):
+                v = row.get(col, "")
+                if isinstance(v, float) and math.isnan(v): v = 0
+                fmt = sig_fmt(str(v)) if col == "Signal" else (money_fmt if col == "EstCostUSD" else cell_fmt)
+                ws2.write(ri, ci, v, fmt)
+        col2_widths = [24,14,9,8,8,8,8,8,11,10,10,13,16,14,13,10,12,14,12]
+        for i, w in enumerate(col2_widths): ws2.set_column(i, i, w)
+
+        # ── Sheet 3: 6-Month Forecast ──
+        ws3 = wb.add_worksheet("6-Month Forecast")
+        ws3.write(0, 0, "📅 6-Month Forward Demand Forecast (TWMAP Algorithm)", title_fmt)
+        hdrs3 = ["Item Code","Class","Signal","Conf","Trend×","Base Monthly","Net Stock"]
+        for m in MONTH_LABELS: hdrs3 += [f"{m} Low", f"{m} Mid", f"{m} High"]
+        hdrs3 += ["6M Total Mid","Stock End (Mid)","Stockout Month","Proposed Buy","Est Cost USD"]
+        write_headers(ws3, hdrs3, row=1)
+        ws3.freeze_panes(2, 0)
+        ws3.autofilter(1, 0, 1, len(hdrs3)-1)
+
+        sort_df = df.copy()
+        sort_df["_risk"] = sort_df.HasStockoutRisk.astype(int)
+        sort_df = sort_df.sort_values(["_risk","ProposedQty_6M"], ascending=[False,False])
+
+        for ri, (_, row) in enumerate(sort_df.iterrows(), 2):
+            fixed = [row.ItemCode, str(row.ItemClass).replace("_"," "),
+                     row.Signal, row.ForecastConf,
+                     round(float(row.TrendMult),3), round(float(row.BaseMonthlySales),2),
+                     round(float(row.NetStock_Now),1)]
+            month_vals = []
+            for m in MONTH_LABELS:
+                month_vals += [round(float(row.get(f"Proj_Low_{m}",0)),2),
+                               round(float(row.get(f"Proj_Mid_{m}",0)),2),
+                               round(float(row.get(f"Proj_High_{m}",0)),2)]
+            summary_vals = [round(float(row.F6M_Mid),1),
+                            round(float(row.StockEnd_Mid),1),
+                            str(row.StockoutMonth),
+                            round(float(row.ProposedQty_6M),0),
+                            round(float(row.EstCostUSD),2)]
+            all_vals = fixed + month_vals + summary_vals
+            for ci, v in enumerate(all_vals):
+                if isinstance(v, float) and math.isnan(v): v = 0
+                use_fmt = sig_fmt(str(v)) if ci == 2 else (
+                    red_fmt if (ci == len(fixed)+len(month_vals)+2 and str(v) != "None") else (
+                    grn_fmt if ci == len(all_vals)-2 and float(v or 0) > 0 else (
+                    money_fmt if ci == len(all_vals)-1 else cell_fmt)))
+                ws3.write(ri, ci, v, use_fmt)
+        ws3.set_column(0, 0, 24)
+        ws3.set_column(1, 6, 12)
+        for i in range(7, 7+len(MONTH_LABELS)*3): ws3.set_column(i, i, 9)
+        ws3.set_column(7+len(MONTH_LABELS)*3, 7+len(MONTH_LABELS)*3+4, 14)
+
+        # ── Sheet 4: Full Analysis ──
+        yr_cols = []
+        for yr in YEARS: yr_cols += [f"Inq {yr}", f"Sales {yr}", f"Purch {yr}"]
+        hdrs4 = ["Item Code","Class","Signal","Score","Total Inq","Total Sales",
+                 "Total Purch","Avg Monthly Sales","QOH","Open SO","Avail Stock",
+                 "Incoming PO","Net Avail","Cover Days","Lead Wks",
+                 "Proposed Qty","Est Cost USD","Stockout Month"] + yr_cols
+        df_out = df.sort_values("Score", ascending=False)
+        df_out.to_excel(writer, sheet_name="Full Analysis", index=False,
+                        startrow=1, header=False)
+        ws4 = writer.sheets["Full Analysis"]
+        ws4.write(0, 0, "📋 Full Item Analysis — All Items", title_fmt)
+        for ci, h in enumerate(hdrs4): ws4.write(1, ci, h, hdr_fmt)
+
+        # ── Sheet 5: Balance Sheet ──
+        ws5 = wb.add_worksheet("Year Balance")
+        ws5.write(0, 0, "📈 Year-wise Balance Sheet", title_fmt)
+        write_headers(ws5, ["Year","Inquiries","Sales","Purchases","Conv Rate %","Net (Purch-Sales)"], row=1)
+        for ri, yr in enumerate(YEARS, 2):
+            d = summary["annual"][yr]
+            conv = round(d["sales"]/(d["inq"]+1)*100,1) if d["inq"]>0 else 0
+            net  = d["purch"] - d["sales"]
+            for ci, v in enumerate([yr, d["inq"], d["sales"], d["purch"], conv, net]):
+                f = grn_fmt if (ci == 5 and v >= 0) else (red_fmt if (ci == 5 and v < 0) else cell_fmt)
+                ws5.write(ri, ci, v, f)
+        for i, w in enumerate([10,14,14,16,14,18]): ws5.set_column(i, i, w)
+
+    buf.seek(0)
+    return buf
+
+
+# ─────────────────────────────────────────────────────────────────
+# STREAMLIT UI
+# ─────────────────────────────────────────────────────────────────
+def _badge(text, color):
+    return f'<span style="background:{color};color:#fff;padding:2px 10px;border-radius:4px;font-size:12px;font-weight:700">{text}</span>'
+
+
+def _kpi_card(label, value, color, icon=""):
+    st.markdown(f"""
+    <div style="background:#fff;border:1px solid #e0e0e0;border-radius:8px;
+                padding:14px 18px;border-top:3px solid {color};
+                box-shadow:0 1px 4px rgba(0,0,0,0.06)">
+      <div style="font-size:10px;color:#888;letter-spacing:0.1em;text-transform:uppercase">{icon} {label}</div>
+      <div style="font-size:28px;font-weight:800;color:{color};line-height:1.1">{value}</div>
+    </div>""", unsafe_allow_html=True)
+
+
+def main():
+    st.set_page_config(
+        page_title="SteelPulse — Procurement Intelligence",
+        page_icon="🔩",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    # ── Global CSS ──
+    st.markdown("""
+    <style>
+    #MainMenu,footer {visibility:hidden}
+    .block-container {padding-top:1rem;padding-bottom:1rem}
+    .stDataFrame {font-size:12px}
+    div[data-testid="metric-container"] {
+        background:#fff;border:1px solid #e0e0e0;border-radius:8px;
+        padding:10px 14px;border-top:3px solid #2D3561
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── Header ──
+    st.markdown("""
+    <div style="background:#1A1A2E;padding:16px 24px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
+      <span style="font-size:28px;font-weight:800;color:#fff">🔩 Steel<span style="color:#f0a500">Pulse</span></span>
+      <span style="color:#555;font-size:13px">| Procurement Intelligence Platform</span>
+      <span style="margin-left:auto;color:#888;font-size:11px">WMSPS Algorithm + TWMAP 6-Month Forecast</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ─────────────────────────────────
+    # SIDEBAR
+    # ─────────────────────────────────
+    with st.sidebar:
+        st.markdown("### 📁 Upload SAP Export")
+        uploaded = st.file_uploader(
+            "Drop your .xlsx file here",
+            type=["xlsx","xls"],
+            help="Upload the SAP Excel export containing: Quotation-Table, SO-Table, Purchase-Table, Tubing Stock balance, 144 PRICE sheets"
+        )
+
+        st.markdown("---")
+        st.markdown("### 🔍 Filters")
+        filter_signal = st.multiselect("Signal", ["BUY","WATCH","HOLD","SKIP"], default=[])
+        filter_class  = st.multiselect("Item Class", ["FAST_MOVER","SLOW_MOVER","PROJECT","DEAD"], default=[])
+        filter_risk   = st.checkbox("⚠️ Stockout Risk Only", value=False)
+        search_term   = st.text_input("Search Item Code", placeholder="e.g. SS-T8-S-065")
+
+        st.markdown("---")
+        st.markdown("### 📖 Required Sheets")
+        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance","144 PRICE"]:
+            st.markdown(f"- `{s}`")
+
+        st.markdown("---")
+        st.markdown("""
+        <div style='font-size:11px;color:#888'>
+        <b>Algorithm:</b> WMSPS<br>
+        S1 Velocity 35% · S2 Conversion 25%<br>
+        S3 Coverage 25% · S4 Open SO 15%<br><br>
+        <b>Forecast:</b> TWMAP<br>
+        Base × Trend × Inquiry Boost × Decay
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── No file state ──
+    if uploaded is None:
+        st.markdown("""
+        <div style="text-align:center;padding:80px 20px;background:#111318;border-radius:12px;border:2px dashed #444">
+          <div style="font-size:60px;margin-bottom:16px">🔩</div>
+          <div style="font-size:24px;font-weight:700;color:#ffffff;margin-bottom:8px">Upload your SAP Excel export to begin</div>
+          <div style="font-size:14px;color:#aaa">Drag and drop your .xlsx file in the sidebar<br>
+          The algorithm will process all sheets automatically</div>
+          <br>
+          <div style="display:inline-block;background:#1A1A2E;border-radius:8px;padding:20px 36px;margin-top:8px;text-align:left;border:1px solid #333">
+            <div style="color:#f0a500;font-weight:700;margin-bottom:10px;font-size:14px">What you get:</div>
+            <div style="color:#fff;font-size:13px;line-height:2">
+            ✅ &nbsp;Procurement Score (0–100) per item<br>
+            ✅ &nbsp;BUY / WATCH / HOLD / SKIP signals<br>
+            ✅ &nbsp;6-Month demand forecast with confidence bands<br>
+            ✅ &nbsp;Stockout risk detection per item<br>
+            ✅ &nbsp;Proposed purchase quantity (lengths)<br>
+            ✅ &nbsp;Professional Excel report — 5 sheets
+            </div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # ── Run analysis ──
+    with st.spinner("⚙️ Running WMSPS algorithm + TWMAP 6-month forecast..."):
+        file_bytes = uploaded.read()
+        df = run_full_analysis(file_bytes, uploaded.name)
+
+    summary = compute_summary(df)
+
+    # ── Apply sidebar filters ──
+    filtered = df.copy()
+    if filter_signal: filtered = filtered[filtered.Signal.isin(filter_signal)]
+    if filter_class:  filtered = filtered[filtered.ItemClass.isin(filter_class)]
+    if filter_risk:   filtered = filtered[filtered.HasStockoutRisk == True]
+    if search_term:   filtered = filtered[filtered.ItemCode.str.contains(search_term, case=False, na=False)]
+
+    # ── Export button ──
+    col_exp, col_info = st.columns([2, 8])
+    with col_exp:
+        excel_buf = build_excel_export(df)
+        st.download_button(
+            label="⬇️ Export Excel Report",
+            data=excel_buf,
+            file_name=f"SteelPulse_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
+    with col_info:
+        st.caption(f"📁 {uploaded.name} · {summary['total']} items processed · {len(filtered)} shown after filters")
+
+    # ─────────────────────────────────
+    # KPI ROW
+    # ─────────────────────────────────
+    c1,c2,c3,c4,c5,c6,c7,c8 = st.columns(8)
+    with c1: st.metric("Total Items",   f"{summary['total']:,}")
+    with c2: st.metric("🟢 BUY",         summary['buy'],    help="Order immediately")
+    with c3: st.metric("🔵 WATCH",       summary['watch'],  help="Prepare to order")
+    with c4: st.metric("🟡 HOLD",        summary['hold'],   help="Monitor monthly")
+    with c5: st.metric("⛔ SKIP",        summary['skip'],   help="Do not order")
+    with c6: st.metric("⚠️ Stockout Risk", summary['stockout_risk'], help="Stock runs out within 6 months")
+    with c7: st.metric("🛒 Proposed Qty", f"{summary['proposed_qty']:,}", help="Lengths to buy (6M cover)")
+    with c8: st.metric("💵 Est. Cost",   f"${summary['est_cost_usd']/1000:.0f}K", help="USD (priced items only)")
+
+    st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
+
+    # ─────────────────────────────────
+    # TABS
+    # ─────────────────────────────────
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📈 Forecast & Buy Signals",
+        "📅 6-Month Projection",
+        "📊 Analytics",
+        "📋 Balance Sheet",
+        "⚙️ Algorithm Explained",
+    ])
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 1 — FORECAST & BUY SIGNALS
+    # ══════════════════════════════════════════════════════════════
+    with tab1:
+        st.markdown("#### 🛒 Procurement Signals — Click any row for full detail")
+
+        # Urgency alerts
+        critical = df[(df.Signal=="BUY") & (df.StockoutMonth.isin([MONTH_LABELS[0], MONTH_LABELS[1]]))]
+        if len(critical) > 0:
+            st.error(f"🔴 **{len(critical)} items** will stock out in the next 2 months ({MONTH_LABELS[0]}, {MONTH_LABELS[1]}) — ORDER IMMEDIATELY")
+
+        open_so_risk = df[(df.OpenSO > df.AvailStock) & (df.TotalSales > 0)]
+        if len(open_so_risk) > 0:
+            st.warning(f"🟠 **{len(open_so_risk)} items** have Open SO exceeding Available Stock — customer deliveries at risk")
+
+        # Build display table
+        display_cols = {
+            "ItemCode":       "Item Code",
+            "ItemClass":      "Class",
+            "Signal":         "Signal",
+            "Score":          "Score",
+            "F6M_Mid":        "6M Demand (Mid)",
+            "F6M_Low":        "6M Low",
+            "F6M_High":       "6M High",
+            "NetStock_Now":   "Net Stock",
+            "StockEnd_Mid":   "Stock End (Mid)",
+            "StockoutMonth":  "Stockout In",
+            "ProposedQty_6M": "Proposed Buy",
+            "EstCostUSD":     "Est Cost (USD)",
+            "ForecastConf":   "Confidence",
+            "TrendMult":      "Trend ×",
+            "LeadTimeWeeks":  "Lead Wks",
+        }
+
+        tbl = filtered[list(display_cols.keys())].rename(columns=display_cols).copy()
+        tbl["Score"] = tbl["Score"].round(1)
+        tbl["Est Cost (USD)"] = tbl["Est Cost (USD)"].apply(
+            lambda x: f"${x:,.0f}" if x > 0 else "—"
+        )
+        tbl["Stock End (Mid)"] = tbl["Stock End (Mid)"].round(1)
+        tbl["6M Demand (Mid)"] = tbl["6M Demand (Mid)"].round(1)
+        tbl["Trend ×"] = tbl["Trend ×"].round(2)
+
+        def highlight_row(row):
+            sig = row["Signal"]
+            if sig == "BUY":
+                return ["background-color:#d4edda;color:#155724"] * len(row)
+            elif sig == "WATCH":
+                return ["background-color:#e8f4ff;color:#004085"] * len(row)
+            elif sig == "HOLD":
+                return ["background-color:#fffde7;color:#856404"] * len(row)
+            elif row.get("Stockout In","None") != "None":
+                return ["background-color:#fff5f5;color:#cc0000"] * len(row)
+            return [""] * len(row)
+
+        styled = tbl.sort_values("Score", ascending=False).style.apply(highlight_row, axis=1)
+        st.dataframe(styled, use_container_width=True, height=520)
+
+        st.caption(f"Showing {len(filtered):,} items · Green = BUY · Blue = WATCH · Red background = Stockout risk · Click column header to sort")
+
+        # ── Item detail expander ──
+        st.markdown("---")
+        st.markdown("#### 🔎 Item Deep Dive")
+        item_list = filtered[filtered.Signal.isin(["BUY","WATCH"])]["ItemCode"].tolist()
+        if not item_list:
+            item_list = filtered["ItemCode"].tolist()
+
+        if item_list:
+            selected = st.selectbox("Select an item to inspect:", item_list)
+            if selected:
+                irow = df[df.ItemCode == selected].iloc[0]
+                _show_item_detail(irow)
+
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 2 — 6-MONTH PROJECTION
+    # ══════════════════════════════════════════════════════════════
+    with tab2:
+        st.markdown("#### 📅 6-Month Forward Demand Forecast")
+        st.caption(f"Forecast months: **{' → '.join(MONTH_LABELS)}** · Method: TWMAP (Trend-Weighted Moving Average Projection)")
+
+        # ── Aggregate chart for BUY items ──
+        buy_items = df[df.Signal == "BUY"]
+        if len(buy_items) > 0:
+            agg = pd.DataFrame({
+                "Month": MONTH_LABELS,
+                "Low":  [buy_items[f"Proj_Low_{m}"].sum()  for m in MONTH_LABELS],
+                "Mid":  [buy_items[f"Proj_Mid_{m}"].sum()  for m in MONTH_LABELS],
+                "High": [buy_items[f"Proj_High_{m}"].sum() for m in MONTH_LABELS],
+            })
+
+            fig = go.Figure()
+            fig.add_trace(go.Bar(name="Mid Forecast", x=agg.Month, y=agg.Mid,
+                                 marker_color="#007bff", opacity=0.85))
+            fig.add_trace(go.Scatter(name="High (+30%)", x=agg.Month, y=agg.High,
+                                     mode="lines+markers", line=dict(color="#28a745", dash="dash", width=2),
+                                     marker=dict(size=6)))
+            fig.add_trace(go.Scatter(name="Low (−25%)", x=agg.Month, y=agg.Low,
+                                     mode="lines+markers", line=dict(color="#dc3545", dash="dash", width=2),
+                                     marker=dict(size=6), fill="tonexty", fillcolor="rgba(200,230,255,0.15)"))
+            fig.update_layout(title="Aggregate 6-Month Demand — All BUY Items (lengths)",
+                              xaxis_title="Month", yaxis_title="Lengths",
+                              height=340, plot_bgcolor="#fafafa",
+                              legend=dict(orientation="h", yanchor="bottom", y=1.02))
+            st.plotly_chart(fig, use_container_width=True)
+
+        # ── Stockout risk table ──
+        st.markdown("#### ⚠️ Stockout Risk Items")
+        risk_df = df[df.HasStockoutRisk == True].copy()
+        risk_df = risk_df.sort_values("StockoutMonth")
+
+        if len(risk_df) == 0:
+            st.success("✅ No stockout risk detected in the next 6 months")
+        else:
+            st.error(f"**{len(risk_df)} items** at risk of stocking out within 6 months")
+
+            risk_cols = ["ItemCode","Signal","NetStock_Now","F6M_Mid","StockEnd_Mid",
+                         "StockoutMonth","ProposedQty_6M"] + [f"Proj_Mid_{m}" for m in MONTH_LABELS]
+            risk_display = risk_df[risk_cols].copy()
+            risk_display.columns = (
+                ["Item Code","Signal","Net Stock","6M Demand","Stock End","Stockout In","Buy Now"] +
+                [f"{m}" for m in MONTH_LABELS]
+            )
+            risk_display = risk_display.round(1)
+
+            def highlight_risk(row):
+                mo = str(row.get("Stockout In","None"))
+                if mo in [MONTH_LABELS[0], MONTH_LABELS[1]]:
+                    return ["background-color:#ffe5e5;font-weight:bold"] * len(row)
+                return ["background-color:#fff8e1"] * len(row)
+
+            st.dataframe(
+                risk_display.style.apply(highlight_risk, axis=1),
+                use_container_width=True, height=420
+            )
+            st.caption("Red rows = stock out within 2 months. Yellow = 3–6 months.")
+
+        # ── Per-item forecast chart ──
+        st.markdown("---")
+        st.markdown("#### 🔍 Per-Item 6-Month Forecast")
+        item_sel2 = st.selectbox(
+            "Select item:", df[df.TotalSales > 0]["ItemCode"].tolist(), key="fc_item"
+        )
+        if item_sel2:
+            irow2 = df[df.ItemCode == item_sel2].iloc[0]
+            _show_forecast_chart(irow2)
+
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 3 — ANALYTICS
+    # ══════════════════════════════════════════════════════════════
+    with tab3:
+        st.markdown("#### 📊 Analytics Dashboard")
+
+        col_a, col_b = st.columns([3, 2])
+
+        with col_a:
+            # Annual trend chart
+            annual_df = pd.DataFrame([
+                {"Year": yr, "Type": "Inquiry",  "Quantity": summary["annual"][yr]["inq"]}
+                for yr in YEARS
+            ] + [
+                {"Year": yr, "Type": "Sales",    "Quantity": summary["annual"][yr]["sales"]}
+                for yr in YEARS
+            ] + [
+                {"Year": yr, "Type": "Purchase", "Quantity": summary["annual"][yr]["purch"]}
+                for yr in YEARS
+            ])
+            fig2 = px.bar(annual_df, x="Year", y="Quantity", color="Type", barmode="group",
+                          color_discrete_map={"Inquiry":"#007bff","Sales":"#28a745","Purchase":"#f0a500"},
+                          title="Annual Inquiry vs Sales vs Purchase (all items · lengths)")
+            fig2.update_layout(height=320, plot_bgcolor="#fafafa")
+            st.plotly_chart(fig2, use_container_width=True)
+
+            # Conversion rate trend
+            conv_df = pd.DataFrame([{
+                "Year": yr,
+                "Conversion %": round(
+                    summary["annual"][yr]["sales"] / (summary["annual"][yr]["inq"]+1) * 100, 2
+                )
+            } for yr in YEARS])
+            fig3 = px.line(conv_df, x="Year", y="Conversion %",
+                           title="Inquiry-to-Sales Conversion Rate (%)",
+                           markers=True, color_discrete_sequence=["#fd7e14"])
+            fig3.update_layout(height=260, plot_bgcolor="#fafafa")
+            st.plotly_chart(fig3, use_container_width=True)
+
+        with col_b:
+            # Signal pie
+            pie_data = pd.DataFrame({
+                "Signal": ["BUY","WATCH","HOLD","SKIP"],
+                "Count": [summary["buy"],summary["watch"],summary["hold"],summary["skip"]]
+            })
+            fig4 = px.pie(pie_data, values="Count", names="Signal",
+                          color="Signal",
+                          color_discrete_map={"BUY":"#28a745","WATCH":"#007bff","HOLD":"#ffc107","SKIP":"#dc3545"},
+                          title="Signal Distribution")
+            fig4.update_traces(textposition="inside", textinfo="percent+label")
+            fig4.update_layout(height=280, showlegend=False)
+            st.plotly_chart(fig4, use_container_width=True)
+
+            # Class breakdown
+            class_data = pd.DataFrame({
+                "Class": ["FAST MOVER","SLOW MOVER","PROJECT","DEAD"],
+                "Count": [summary["fast"],summary["slow"],summary["project"],summary["dead"]]
+            })
+            fig5 = px.bar(class_data, x="Count", y="Class", orientation="h",
+                          color="Class",
+                          color_discrete_map={"FAST MOVER":"#28a745","SLOW MOVER":"#007bff",
+                                              "PROJECT":"#fd7e14","DEAD":"#6c757d"},
+                          title="Item Classification")
+            fig5.update_layout(height=250, showlegend=False, plot_bgcolor="#fafafa",
+                               yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig5, use_container_width=True)
+
+        # Top items by proposed qty
+        st.markdown("#### 🏆 Top Items by Proposed Purchase Quantity")
+        top_df = df[df.ProposedQty_6M > 0].nlargest(15, "ProposedQty_6M")[
+            ["ItemCode","Signal","ItemClass","ProposedQty_6M","F6M_Mid",
+             "NetStock_Now","StockoutMonth","LeadTimeWeeks","PricePerLength","EstCostUSD"]
+        ].copy()
+        top_df.columns = ["Item Code","Signal","Class","Proposed Qty","6M Demand",
+                          "Net Stock","Stockout","Lead Wks","Price/Len","Est Cost USD"]
+        top_df["Est Cost USD"] = top_df["Est Cost USD"].apply(lambda x: f"${x:,.0f}" if x > 0 else "—")
+        top_df = top_df.round(1)
+
+        fig6 = px.bar(top_df.head(15), x="Proposed Qty", y="Item Code",
+                      orientation="h", color="Signal",
+                      color_discrete_map={"BUY":"#28a745","WATCH":"#007bff","HOLD":"#ffc107","SKIP":"#dc3545"},
+                      title="Top 15 Items — Proposed Purchase Quantity (lengths)")
+        fig6.update_layout(height=400, plot_bgcolor="#fafafa",
+                           yaxis=dict(autorange="reversed"), showlegend=True)
+        st.plotly_chart(fig6, use_container_width=True)
+        st.dataframe(top_df.set_index("Item Code"), use_container_width=True)
+
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 4 — BALANCE SHEET
+    # ══════════════════════════════════════════════════════════════
+    with tab4:
+        st.markdown("#### 📋 Year-wise Balance Sheet — Inquiry vs Sales vs Purchase")
+
+        balance_rows = []
+        for yr in YEARS:
+            inq   = summary["annual"][yr]["inq"]
+            sales = summary["annual"][yr]["sales"]
+            purch = summary["annual"][yr]["purch"]
+            conv  = round(sales/(inq+1)*100, 2) if inq > 0 else 0
+            balance_rows.append({
+                "Year": yr,
+                "Inquiries (lengths)": inq,
+                "Sales / Consumption (lengths)": sales,
+                "Purchases from Vendor (lengths)": purch,
+                "Conversion Rate %": conv,
+                "Net Position (Purch − Sales)": purch - sales,
+            })
+
+        bal_df = pd.DataFrame(balance_rows).set_index("Year")
+
+        def style_balance(val, col):
+            if col == "Net Position (Purch − Sales)":
+                return "color:#155724;font-weight:bold" if val >= 0 else "color:#cc0000;font-weight:bold"
+            return ""
+
+        st.dataframe(
+            bal_df.style.apply(
+                lambda col: [style_balance(v, col.name) for v in col], axis=0
+            ).format({
+                "Inquiries (lengths)": "{:,.0f}",
+                "Sales / Consumption (lengths)": "{:,.0f}",
+                "Purchases from Vendor (lengths)": "{:,.0f}",
+                "Conversion Rate %": "{:.2f}%",
+                "Net Position (Purch − Sales)": "{:+,.0f}",
+            }),
+            use_container_width=True
+        )
+
+        # Balance waterfall
+        fig7 = make_subplots(specs=[[{"secondary_y": True}]])
+        yrs_str = [str(y) for y in YEARS]
+        fig7.add_trace(go.Bar(name="Inquiries", x=yrs_str,
+                              y=[summary["annual"][y]["inq"]   for y in YEARS],
+                              marker_color="#007bff", opacity=0.7))
+        fig7.add_trace(go.Bar(name="Sales",     x=yrs_str,
+                              y=[summary["annual"][y]["sales"] for y in YEARS],
+                              marker_color="#28a745", opacity=0.9))
+        fig7.add_trace(go.Bar(name="Purchase",  x=yrs_str,
+                              y=[summary["annual"][y]["purch"] for y in YEARS],
+                              marker_color="#f0a500", opacity=0.9))
+        fig7.add_trace(go.Scatter(
+            name="Conv Rate %", x=yrs_str,
+            y=[round(summary["annual"][y]["sales"]/(summary["annual"][y]["inq"]+1)*100,2) for y in YEARS],
+            mode="lines+markers", line=dict(color="#dc3545",width=2),
+            marker=dict(size=8)
+        ), secondary_y=True)
+        fig7.update_layout(barmode="group", height=380, plot_bgcolor="#fafafa",
+                           title="6-Year History — Inquiry / Sales / Purchase + Conversion Rate")
+        fig7.update_yaxes(title_text="Lengths",       secondary_y=False)
+        fig7.update_yaxes(title_text="Conv Rate (%)", secondary_y=True)
+        st.plotly_chart(fig7, use_container_width=True)
+
+        # Stock position table
+        st.markdown("#### 📦 Current Stock Position")
+        stock_df = df[["ItemCode","QOH","OpenSO","AvailStock","IncomingPO",
+                        "NetAvailStock","ItemClass","Signal","StockCoverDays"]].copy()
+        stock_df = stock_df[stock_df.QOH > 0].sort_values("QOH", ascending=False)
+        stock_df.columns = ["Item","QOH","Open SO","Avail Stock","Incoming PO",
+                             "Net Avail","Class","Signal","Cover Days"]
+        st.dataframe(stock_df.set_index("Item"), use_container_width=True, height=400)
+
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 5 — ALGORITHM EXPLAINED
+    # ══════════════════════════════════════════════════════════════
+    with tab5:
+        st.markdown("#### ⚙️ How the Algorithm Works")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("""
+            <div style="background:#f8f9fa;border-radius:10px;padding:20px;border-left:4px solid #1A1A2E">
+            <h4 style="color:#1A1A2E;margin-top:0">🧮 WMSPS — Procurement Scoring</h4>
+            <p style="color:#555;font-size:13px">
+            <b>Weighted Multi-Signal Procurement Scoring</b> gives each item a
+            0–100 score from 4 independent signals, then derives a buy/watch/hold/skip decision.
+            </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            for title, pct, desc, color, detail in [
+                ("🔵 S1 — Sales Velocity", "35%",
+                 "Is demand growing or dying?",
+                 "#007bff",
+                 "Weighted least-squares regression across 6 years. Years 2025–2026 carry 2×–3× more weight than 2021. A positive slope = growing sales = high score. Items with zero recent sales score near 0."),
+                ("🟣 S2 — Inquiry Conversion", "25%",
+                 "Do inquiries turn into orders?",
+                 "#6f42c1",
+                 "Conversion Rate = Total Sales ÷ Total Inquiries. High recent inquiry volume adds a boost. This catches items where demand is building but not yet converted (project pipeline)."),
+                ("🟠 S3 — Stock Coverage", "25%",
+                 "How many months of stock remain vs lead time?",
+                 "#fd7e14",
+                 "Coverage = NET Stock ÷ Avg Monthly Sales. Lead-time aware: if stock covers less than lead time → score 95–100 (will stockout before PO arrives). Zero stock = score 100 (critical)."),
+                ("🔴 S4 — Open SO Pressure", "15%",
+                 "Are booked customer orders at risk?",
+                 "#dc3545",
+                 "% of Open Sales Orders uncovered by Available Stock. If Open SO > Stock → customer commitments are at risk → forces BUY signal regardless of score."),
+            ]:
+                with st.expander(f"{title} — Weight: {pct}  ·  {desc}"):
+                    st.markdown(f"""
+                    <div style="border-left:3px solid {color};padding:8px 12px;font-size:13px;color:#444">
+                    {detail}
+                    </div>""", unsafe_allow_html=True)
+
+            st.markdown("""
+            <div style="background:#1A1A2E;color:#fff;padding:12px 16px;border-radius:6px;font-family:monospace;font-size:13px;margin-top:12px">
+            Score = S1×0.35 + S2×0.25 + S3×0.25 + S4×0.15<br><br>
+            🟢 BUY   → Score ≥ 60  (or Open SO > Available Stock)<br>
+            🔵 WATCH → Score 40–59<br>
+            🟡 HOLD  → Score 20–39<br>
+            ⛔ SKIP  → Score &lt; 20 or DEAD item
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col2:
+            st.markdown("""
+            <div style="background:#f8f9fa;border-radius:10px;padding:20px;border-left:4px solid #007bff">
+            <h4 style="color:#1A1A2E;margin-top:0">📅 TWMAP — 6-Month Forecast</h4>
+            <p style="color:#555;font-size:13px">
+            <b>Trend-Weighted Moving Average Projection</b> computes month-by-month
+            demand for the next 6 months using 3 multiplied signals.
+            </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            for step, title, color, detail in [
+                ("1","Base Monthly Rate","#2D3561",
+                 "Weighted average annual sales ÷ 12. Only years with actual sales are included (zeros excluded from average). Recent years weighted 2×–3× more. 2026 data is annualised from partial-year actuals."),
+                ("2","YoY Trend Multiplier","#007bff",
+                 "Compares recent 2-year sales (2025+2026) vs prior 2-year (2023+2024). If demand doubled → multiplier = 2.0×. If demand halved → 0.5×. Capped at 0.5×–2.0× to prevent extreme projections."),
+                ("3","Inquiry Momentum Boost","#6f42c1",
+                 "Recent inquiry volume vs 6-year average. High recent inquiry = demand pipeline building = boost up to 1.5×. Low recent inquiry = pullback = down to 0.8×."),
+                ("4","Monthly Decay Factor","#fd7e14",
+                 "Months further in the future are less certain. Decay: 1.00, 0.98, 0.96, 0.94, 0.92, 0.90. Low band = Mid × 0.75. High band = Mid × 1.30."),
+            ]:
+                with st.expander(f"Step {step}: {title}"):
+                    st.markdown(f"""
+                    <div style="border-left:3px solid {color};padding:8px 12px;font-size:13px;color:#444">
+                    {detail}
+                    </div>""", unsafe_allow_html=True)
+
+            st.markdown("""
+            <div style="background:#1A1A2E;color:#fff;padding:12px 16px;border-radius:6px;font-family:monospace;font-size:13px;margin-top:12px">
+            Monthly[i] = Base × Trend × InqBoost × Decay[i]<br>
+            Low  = Mid × 0.75 &nbsp;|&nbsp; High = Mid × 1.30<br><br>
+            NET Stock = QOH + Incoming PO − Open SO<br>
+            BuyNow = max(0, 6M Total + Safety − NET Stock)<br>
+            Safety Buffer = 1 month of base forecast<br><br>
+            Confidence: HIGH = sales 4+ yrs · MED = 2-3 yrs · LOW = 1 yr
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("##### 📦 Item Classification Rules")
+            class_rules = pd.DataFrame([
+                ["FAST MOVER",  "Sales in 3+ of the 6 years", "Standard 6M cover + 2mo safety"],
+                ["SLOW MOVER",  "Sales in 1–2 years only",    "6M cover + 1mo safety"],
+                ["PROJECT",     "1 big spike year, quiet rest","6M cover + 1mo (manual review)"],
+                ["DEAD",        "Zero sales, <3 total inquiries","Never buy — score forced to 0"],
+            ], columns=["Class","Trigger","Buy Logic"])
+            st.dataframe(class_rules.set_index("Class"), use_container_width=True)
+
+
+# ─────────────────────────────────────────────────────────────────
+# HELPER: Item detail panel
+# ─────────────────────────────────────────────────────────────────
+def _show_item_detail(row):
+    sig_color = SIGNAL_COLORS.get(str(row.Signal), "#888")
+    cls_color = CLASS_COLORS.get(str(row.ItemClass), "#888")
+    conf_color = CONF_COLORS.get(str(row.ForecastConf), "#888")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(f"""
+        <div style="background:{sig_color}22;border:1px solid {sig_color};border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:10px;color:#888;text-transform:uppercase">Signal</div>
+          <div style="font-size:22px;font-weight:800;color:{sig_color}">{row.Signal}</div>
+          <div style="font-size:11px;color:#888">Score: {row.Score:.1f}/100</div>
+        </div>""", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""
+        <div style="background:{cls_color}22;border:1px solid {cls_color};border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:10px;color:#888;text-transform:uppercase">Class</div>
+          <div style="font-size:16px;font-weight:700;color:{cls_color}">{str(row.ItemClass).replace('_',' ')}</div>
+        </div>""", unsafe_allow_html=True)
+    with c3:
+        proposed = int(row.ProposedQty_6M)
+        st.markdown(f"""
+        <div style="background:#d4edda;border:1px solid #28a745;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:10px;color:#888;text-transform:uppercase">Proposed Buy (6M)</div>
+          <div style="font-size:22px;font-weight:800;color:#155724">{proposed:,} lengths</div>
+          <div style="font-size:11px;color:#888">${row.EstCostUSD:,.0f} USD</div>
+        </div>""", unsafe_allow_html=True)
+    with c4:
+        stkout = str(row.StockoutMonth)
+        bg = "#ffe5e5" if stkout != "None" else "#d4edda"
+        fg = "#cc0000" if stkout != "None" else "#155724"
+        msg = f"Stockout: {stkout}" if stkout != "None" else "No Stockout Risk"
+        st.markdown(f"""
+        <div style="background:{bg};border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:10px;color:#888;text-transform:uppercase">Stockout Risk</div>
+          <div style="font-size:16px;font-weight:700;color:{fg}">{msg}</div>
+          <div style="font-size:11px;color:#888">6M Demand: {row.F6M_Mid:.1f} lengths</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
+
+    col_l, col_r = st.columns(2)
+
+    with col_l:
+        st.markdown("**Algorithm Scores**")
+        scores = {
+            "Overall Score":         row.Score,
+            "S1 Velocity (35%)":     row.S1_Velocity,
+            "S2 Conversion (25%)":   row.S2_Conversion,
+            "S3 Cov Coverage (25%)": row.S3_Coverage,
+            "S4 Open SO (15%)":      row.S4_OpenSO,
+        }
+        for label, val in scores.items():
+            val = float(val) if pd.notna(val) else 0
+            bar_color = "#28a745" if val>=60 else "#007bff" if val>=40 else "#ffc107" if val>=20 else "#dc3545"
+            st.markdown(f"""
+            <div style="margin-bottom:8px">
+              <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">
+                <span style="color:#555">{label}</span>
+                <span style="font-weight:700;color:{bar_color}">{val:.1f}</span>
+              </div>
+              <div style="background:#e9ecef;border-radius:4px;height:8px;overflow:hidden">
+                <div style="width:{min(100,val)}%;background:{bar_color};height:100%;border-radius:4px"></div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("**Forecast Parameters**")
+        params = {
+            "Base Monthly Sales":    f"{row.BaseMonthlySales:.2f} lengths/month",
+            "Trend Multiplier":      f"{row.TrendMult:.3f}× (YoY growth)",
+            "Inquiry Boost":         f"{row.InqBoost:.3f}× (demand signal)",
+            "Lead Time":             f"{int(row.LeadTimeWeeks)} weeks",
+            "Net Stock Now":         f"{row.NetStock_Now:.0f} lengths",
+            "Safety Buffer":         f"{row.SafetyBuffer:.1f} lengths",
+            "Forecast Confidence":   str(row.ForecastConf),
+        }
+        param_df = pd.DataFrame(params.items(), columns=["Parameter","Value"])
+        st.dataframe(param_df.set_index("Parameter"), use_container_width=True)
+
+    with col_r:
+        # 6M forecast chart
+        chart_data = pd.DataFrame({
+            "Month": MONTH_LABELS,
+            "Low":  [float(row.get(f"Proj_Low_{m}",0)) for m in MONTH_LABELS],
+            "Mid":  [float(row.get(f"Proj_Mid_{m}",0)) for m in MONTH_LABELS],
+            "High": [float(row.get(f"Proj_High_{m}",0)) for m in MONTH_LABELS],
+        })
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=chart_data.Month, y=chart_data.High,
+                                 fill=None, mode="lines", line_color="#28a745",
+                                 line_dash="dash", name="High (+30%)"))
+        fig.add_trace(go.Scatter(x=chart_data.Month, y=chart_data.Low,
+                                 fill="tonexty", mode="lines", line_color="#dc3545",
+                                 line_dash="dash", name="Low (−25%)",
+                                 fillcolor="rgba(173,216,230,0.25)"))
+        fig.add_trace(go.Scatter(x=chart_data.Month, y=chart_data.Mid,
+                                 mode="lines+markers", line=dict(color="#007bff",width=3),
+                                 marker=dict(size=8), name="Mid forecast"))
+        fig.update_layout(title=f"6-Month Forecast — {row.ItemCode}",
+                          height=260, plot_bgcolor="#fafafa",
+                          legend=dict(orientation="h",yanchor="bottom",y=1.02))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # History chart
+        hist = pd.DataFrame({
+            "Year": [str(y) for y in YEARS],
+            "Inquiry": [float(row.get(f"Inq_{y}",0)) for y in YEARS],
+            "Sales":   [float(row.get(f"Sales_{y}",0)) for y in YEARS],
+            "Purchase":[float(row.get(f"Purch_{y}",0)) for y in YEARS],
+        })
+        fig2 = px.bar(hist, x="Year", y=["Inquiry","Sales","Purchase"], barmode="group",
+                      color_discrete_map={"Inquiry":"#007bff","Sales":"#28a745","Purchase":"#f0a500"},
+                      title="6-Year History")
+        fig2.update_layout(height=240, plot_bgcolor="#fafafa",
+                           legend=dict(orientation="h",yanchor="bottom",y=1.02))
+        st.plotly_chart(fig2, use_container_width=True)
+
+
+def _show_forecast_chart(row):
+    chart_data = pd.DataFrame({
+        "Month": MONTH_LABELS,
+        "Low":   [float(row.get(f"Proj_Low_{m}",0))  for m in MONTH_LABELS],
+        "Mid":   [float(row.get(f"Proj_Mid_{m}",0))  for m in MONTH_LABELS],
+        "High":  [float(row.get(f"Proj_High_{m}",0)) for m in MONTH_LABELS],
+    })
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=chart_data.Month, y=chart_data.Mid,
+                         name="Mid forecast", marker_color="#007bff", opacity=0.85))
+    fig.add_trace(go.Scatter(x=chart_data.Month, y=chart_data.High,
+                             mode="lines+markers", line=dict(color="#28a745",dash="dash",width=2),
+                             name="High (+30%)"))
+    fig.add_trace(go.Scatter(x=chart_data.Month, y=chart_data.Low,
+                             mode="lines+markers", line=dict(color="#dc3545",dash="dash",width=2),
+                             name="Low (−25%)"))
+    fig.update_layout(
+        title=f"6-Month Demand Forecast — {row.ItemCode}  |  Trend: {row.TrendMult:.2f}×  |  Confidence: {row.ForecastConf}",
+        height=320, plot_bgcolor="#fafafa",
+        legend=dict(orientation="h",yanchor="bottom",y=1.02)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    c1,c2,c3,c4 = st.columns(4)
+    with c1: st.metric("6M Demand (Mid)",  f"{row.F6M_Mid:.0f} lengths")
+    with c2: st.metric("Stock End (Mid)",   f"{row.StockEnd_Mid:.0f}", delta=None)
+    with c3: st.metric("Proposed Buy",      f"{int(row.ProposedQty_6M):,} lengths")
+    with c4: st.metric("Stockout Risk",     str(row.StockoutMonth) if row.HasStockoutRisk else "✅ None")
+
+
+if __name__ == "__main__":
+    main()
