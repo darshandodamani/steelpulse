@@ -31,6 +31,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from learning import (
+    init_db, is_bootstrapped, bootstrap_from_history,
+    get_correction_factors, apply_corrections,
+    update_from_new_upload, save_forecast_snapshot,
+    get_learning_stats, get_item_learning_detail, get_upload_count
+)
 
 warnings.filterwarnings("ignore")
 
@@ -521,11 +527,20 @@ def run_forecast(df):
 # ─────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def run_full_analysis(file_bytes, filename):
-    buf = io.BytesIO(file_bytes)
+    buf    = io.BytesIO(file_bytes)
     data   = parse_excel(buf)
     master = build_master(data)
     scored = run_algorithm(master)
     result = run_forecast(scored)
+    # Apply learned correction factors if available
+    if is_bootstrapped():
+        corrections = get_correction_factors()
+        result = apply_corrections(result, corrections)
+    else:
+        result["CorrectionFactor"] = 1.0
+        result["CorrectedQty_6M"]  = result["ProposedQty_6M"]
+        result["LearningApplied"]  = False
+        result["CorrectedCostUSD"] = result["EstCostUSD"]
     return result
 
 
@@ -722,6 +737,7 @@ def _kpi_card(label, value, color, icon=""):
 
 
 def main():
+    init_db()   # ensure SQLite tables exist
     st.set_page_config(
         page_title="SteelPulse — Procurement Intelligence",
         page_icon="🔩",
@@ -821,6 +837,21 @@ def main():
 
     summary = compute_summary(df)
 
+    # ── Bootstrap learning on first upload ──
+    upload_id = f"UPLOAD_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    if not is_bootstrapped():
+        with st.spinner("🧠 Initialising learning model from 6 years of history..."):
+            n = bootstrap_from_history(df)
+            save_forecast_snapshot(df, upload_id, uploaded.name, summary)
+        st.success(f"✅ Learning model initialised — {n} items learned from 2021–2024 data, validated on 2025")
+        st.cache_data.clear()
+        df = run_full_analysis(file_bytes, uploaded.name)
+        summary = compute_summary(df)
+    else:
+        # Update learning with new upload data
+        update_from_new_upload(df, upload_id)
+        save_forecast_snapshot(df, upload_id, uploaded.name, summary)
+
     # ── Apply sidebar filters ──
     filtered = df.copy()
     if filter_signal: filtered = filtered[filtered.Signal.isin(filter_signal)]
@@ -860,11 +891,12 @@ def main():
     # ─────────────────────────────────
     # TABS
     # ─────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📈 Forecast & Buy Signals",
         "📅 6-Month Projection",
         "📊 Analytics",
         "📋 Balance Sheet",
+        "🧠 Learning Dashboard",
         "⚙️ Algorithm Explained",
     ])
 
@@ -1166,9 +1198,15 @@ def main():
 
 
     # ══════════════════════════════════════════════════════════════
-    # TAB 5 — ALGORITHM EXPLAINED
+    # TAB 5 — LEARNING DASHBOARD
     # ══════════════════════════════════════════════════════════════
     with tab5:
+        _show_learning_dashboard(df)
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 6 — ALGORITHM EXPLAINED
+    # ══════════════════════════════════════════════════════════════
+    with tab6:
         st.markdown("#### ⚙️ How the Algorithm Works")
 
         col1, col2 = st.columns(2)
@@ -1419,3 +1457,253 @@ def _show_forecast_chart(row):
 
 if __name__ == "__main__":
     main()
+
+
+# ─────────────────────────────────────────────────────────────────
+# LEARNING DASHBOARD
+# ─────────────────────────────────────────────────────────────────
+def _show_learning_dashboard(result_df):
+    st.markdown("#### 🧠 Learning Dashboard — How the Model is Improving")
+    st.caption("The model learns from every upload. Correction factors adjust forecasts based on past accuracy.")
+
+    stats = get_learning_stats()
+
+    if stats.get("total_items_learned", 0) == 0:
+        st.info("🔄 Upload your first file to initialise the learning model.")
+        return
+
+    # ── KPI row ──
+    c1,c2,c3,c4,c5 = st.columns(5)
+    with c1:
+        st.metric("Items Learned", stats["total_items_learned"])
+    with c2:
+        st.metric("✅ Accurate (CF 0.8–1.2×)",
+                  stats.get("items_good_cf", 0),
+                  help="Items where model prediction was within 20%")
+    with c3:
+        st.metric("📉 Over-predicted",
+                  stats.get("items_over", 0),
+                  help="We forecasted too high — correction factor < 0.8×")
+    with c4:
+        st.metric("📈 Under-predicted",
+                  stats.get("items_under", 0),
+                  help="We forecasted too low — correction factor > 1.2×")
+    with c5:
+        st.metric("Median Forecast Error",
+                  f"{stats.get('median_error', 0):.0f}%",
+                  help="Median absolute % error on 2025 validation")
+
+    st.markdown("---")
+
+    col_l, col_r = st.columns(2)
+
+    with col_l:
+        # Correction factor distribution bar chart
+        st.markdown("**📊 Correction Factor Distribution**")
+        st.caption("How far off the model was per item category")
+        cf_dist = stats.get("cf_distribution", {})
+        if cf_dist:
+            cf_df = pd.DataFrame({
+                "Category":  list(cf_dist.keys()),
+                "Items":     list(cf_dist.values()),
+            })
+            colors = ["#dc3545","#fd7e14","#28a745","#007bff","#6f42c1"]
+            fig = go.Figure(go.Bar(
+                x=cf_df["Items"], y=cf_df["Category"],
+                orientation="h",
+                marker_color=colors,
+                text=cf_df["Items"],
+                textposition="outside"
+            ))
+            fig.update_layout(height=260, plot_bgcolor="#fafafa",
+                              xaxis_title="Number of items",
+                              margin=dict(l=0, r=40, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("""
+            <div style="background:#f8f9fa;border-radius:6px;padding:12px;font-size:12px;line-height:1.8">
+            <b>What correction factor means:</b><br>
+            🟢 <b>CF ≈ 1.0</b> — Model was accurate, no adjustment needed<br>
+            🔴 <b>CF &lt; 0.8</b> — Model over-predicted. Future forecasts reduced<br>
+            🔵 <b>CF &gt; 1.2</b> — Model under-predicted. Future forecasts boosted<br>
+            📐 Formula: <code>Corrected Qty = Raw Forecast × CF</code>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col_r:
+        # Model performance over time
+        perf_df = stats.get("perf_df", pd.DataFrame())
+        if not perf_df.empty and len(perf_df) > 1:
+            st.markdown("**📈 Model Accuracy Over Time**")
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter(
+                x=perf_df["upload_date"], y=perf_df["median_error_pct"],
+                name="Median Error %", mode="lines+markers",
+                line=dict(color="#007bff", width=2), marker=dict(size=8)
+            ))
+            fig2.add_trace(go.Scatter(
+                x=perf_df["upload_date"], y=perf_df["items_within_50pct"],
+                name="Items within 50% error", mode="lines+markers",
+                line=dict(color="#28a745", width=2, dash="dash"),
+                marker=dict(size=8), yaxis="y2"
+            ))
+            fig2.update_layout(
+                height=260, plot_bgcolor="#fafafa",
+                yaxis=dict(title="Error %"),
+                yaxis2=dict(title="Items count", overlaying="y", side="right"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                margin=dict(l=0, r=0, t=10, b=10)
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.markdown("**📈 Model Accuracy**")
+            st.markdown("""
+            <div style="background:#f0f7ff;border:1px solid #007bff;border-radius:8px;padding:20px;text-align:center">
+            <div style="font-size:32px;margin-bottom:8px">📅</div>
+            <div style="font-weight:700;color:#004085">Accuracy chart builds over time</div>
+            <div style="color:#888;font-size:12px;margin-top:4px">
+            Upload a new file next month to see how accuracy improves
+            </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── Validation results — 2025 forecast vs actual ──
+    st.markdown("#### 🔍 2025 Validation — Predicted vs Actual")
+    st.caption("Trained on 2021–2024 data → predicted 2025 → compared with actual 2025 sales")
+
+    items_df = stats.get("items_df", pd.DataFrame())
+    if not items_df.empty:
+        # Show with filters
+        fc1, fc2 = st.columns([3,1])
+        with fc2:
+            cf_filter = st.selectbox(
+                "Filter by accuracy:",
+                ["All", "✅ Accurate (CF 0.8–1.2×)",
+                 "📉 Over-predicted (CF < 0.8×)",
+                 "📈 Under-predicted (CF > 1.2×)"],
+                key="cf_filter"
+            )
+        with fc1:
+            item_search = st.text_input("Search item:", placeholder="SS-T8...", key="learn_search")
+
+        disp = items_df.copy()
+        if cf_filter == "✅ Accurate (CF 0.8–1.2×)":
+            disp = disp[(disp.correction_factor >= 0.8) & (disp.correction_factor <= 1.2)]
+        elif cf_filter == "📉 Over-predicted (CF < 0.8×)":
+            disp = disp[disp.correction_factor < 0.8]
+        elif cf_filter == "📈 Under-predicted (CF > 1.2×)":
+            disp = disp[disp.correction_factor > 1.2]
+        if item_search:
+            disp = disp[disp.item_code.str.contains(item_search, case=False, na=False)]
+
+        disp_show = disp[[
+            "item_code","item_class","pred_2025","actual_2025",
+            "error_pct_2025","correction_factor","months_tracked"
+        ]].copy()
+        disp_show.columns = [
+            "Item Code","Class","Predicted 2025","Actual 2025",
+            "Error %","Correction Factor","Months Tracked"
+        ]
+        disp_show["Predicted 2025"]    = disp_show["Predicted 2025"].round(0)
+        disp_show["Actual 2025"]       = disp_show["Actual 2025"].round(0)
+        disp_show["Error %"]           = disp_show["Error %"].round(1)
+        disp_show["Correction Factor"] = disp_show["Correction Factor"].round(3)
+        disp_show = disp_show.sort_values("Error %", ascending=False)
+
+        st.dataframe(disp_show.set_index("Item Code"),
+                     use_container_width=True, height=380)
+
+        st.caption(f"Showing {len(disp_show)} items · CF = Actual ÷ Predicted (applied to all future forecasts)")
+
+    st.markdown("---")
+
+    # ── Side-by-side: raw vs corrected qty for BUY items ──
+    st.markdown("#### ⚖️ Raw Forecast vs Learning-Corrected Forecast — BUY Items")
+    st.caption("Green = corrected qty after applying learned correction factor")
+
+    buy_df = result_df[result_df.Signal == "BUY"].copy()
+    if not buy_df.empty and "CorrectedQty_6M" in buy_df.columns:
+        comp = buy_df[["ItemCode","ProposedQty_6M","CorrectedQty_6M",
+                        "CorrectionFactor","F6M_Mid"]].copy()
+        comp.columns = ["Item","Raw Qty (algorithm)","Corrected Qty (learned)",
+                         "CF Applied","6M Demand"]
+        comp = comp.sort_values("Corrected Qty (learned)", ascending=False)
+
+        fig3 = go.Figure()
+        fig3.add_trace(go.Bar(
+            name="Raw Forecast", x=comp["Item"], y=comp["Raw Qty (algorithm)"],
+            marker_color="#007bff", opacity=0.6
+        ))
+        fig3.add_trace(go.Bar(
+            name="Corrected (Learned)", x=comp["Item"], y=comp["Corrected Qty (learned)"],
+            marker_color="#28a745", opacity=0.9
+        ))
+        fig3.update_layout(
+            barmode="group", height=320, plot_bgcolor="#fafafa",
+            xaxis_tickangle=-45,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            margin=dict(b=80)
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+        st.dataframe(comp.set_index("Item").round(1), use_container_width=True)
+
+    st.markdown("---")
+
+    # ── Upload history ──
+    st.markdown("#### 📂 Upload History")
+    uploads_df = stats.get("uploads_df", pd.DataFrame())
+    if not uploads_df.empty:
+        disp_up = uploads_df[[
+            "filename","uploaded_at","items_processed",
+            "buy_signals","stockout_risk","total_proposed_qty"
+        ]].copy()
+        disp_up.columns = ["File","Uploaded At","Items","BUY Signals","Stockout Risk","Proposed Qty"]
+        st.dataframe(disp_up.set_index("File"), use_container_width=True)
+    else:
+        st.info("No uploads recorded yet.")
+
+    # ── Item-level drill down ──
+    st.markdown("---")
+    st.markdown("#### 🔎 Item Learning Detail")
+    if not items_df.empty:
+        selected_item = st.selectbox(
+            "Select item to inspect learning:",
+            items_df["item_code"].tolist(),
+            key="learn_item_sel"
+        )
+        if selected_item:
+            detail = get_item_learning_detail(selected_item)
+            if detail:
+                d1,d2,d3,d4 = st.columns(4)
+                cf = detail.get("correction_factor", 1.0)
+                cf_color = "#28a745" if 0.8<=cf<=1.2 else ("#dc3545" if cf<0.8 else "#007bff")
+                with d1:
+                    st.markdown(f"""
+                    <div style="background:{cf_color}22;border:2px solid {cf_color};
+                         border-radius:8px;padding:14px;text-align:center">
+                      <div style="font-size:10px;color:#888;text-transform:uppercase">Correction Factor</div>
+                      <div style="font-size:28px;font-weight:800;color:{cf_color}">{cf:.3f}×</div>
+                      <div style="font-size:11px;color:#888">
+                        {'Accurate' if 0.8<=cf<=1.2 else ('Over-predicted' if cf<0.8 else 'Under-predicted')}
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+                with d2:
+                    st.metric("Predicted 2025", f"{detail.get('pred_2025',0):.0f} lengths")
+                with d3:
+                    st.metric("Actual 2025",    f"{detail.get('actual_2025',0):.0f} lengths")
+                with d4:
+                    st.metric("Error %",        f"{detail.get('error_pct_2025',0):.1f}%")
+
+                st.markdown(f"""
+                <div style="background:#f8f9fa;border-radius:6px;padding:12px;font-size:12px;margin-top:8px">
+                <b>What this means:</b><br>
+                Our algorithm predicted <b>{detail.get('pred_2025',0):.0f} lengths</b> for 2025,
+                but actual sales were <b>{detail.get('actual_2025',0):.0f} lengths</b>.<br>
+                The model was {'over-predicting by ' if cf<1 else 'under-predicting by '}
+                <b>{abs(1-cf)*100:.0f}%</b>.<br>
+                Future forecasts for <b>{selected_item}</b> are now
+                {'reduced' if cf<1 else 'boosted'} by <b>{cf:.2f}×</b> automatically.
+                </div>
+                """, unsafe_allow_html=True)
