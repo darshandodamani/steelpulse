@@ -619,14 +619,28 @@ def apply_abc_xyz(df):
     YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
     df = df.copy()
 
-    # ── ABC: Value classification ──
-    df['TotalValue'] = (df['TotalSales'] * df['PricePerLength'].clip(lower=0)).fillna(0)
-    df = df.sort_values('TotalValue', ascending=False).reset_index(drop=True)
-    total_val = df['TotalValue'].sum()
-    df['CumValuePct'] = df['TotalValue'].cumsum() / (total_val + 1e-9) * 100
+    # ABC: Composite Value (fix: 751 of 873 items have no price data)
+    # Use real sales value where price exists; inquiry+sales proxy otherwise
+    YEARS_L = [2021, 2022, 2023, 2024, 2025, 2026]
+    df['TotalValue']    = (df['TotalSales'] * df['PricePerLength'].clip(lower=0)).fillna(0)
+    df['TotalInqAll']   = df[[f'Inq_{y}'   for y in YEARS_L]].sum(axis=1)
+    df['TotalSalesAll'] = df[[f'Sales_{y}' for y in YEARS_L]].sum(axis=1)
+    df['CompositeValue'] = np.where(
+        df['PricePerLength'] > 0,
+        df['TotalValue'],
+        df['TotalInqAll'] * 0.3 + df['TotalSalesAll'] * 10
+    )
+    df = df.sort_values('CompositeValue', ascending=False).reset_index(drop=True)
+    total_val = df['CompositeValue'].sum()
+    df['CumValuePct'] = df['CompositeValue'].cumsum() / (total_val + 1e-9) * 100
     df['ABC'] = 'C'
     df.loc[df['CumValuePct'] <= 80, 'ABC'] = 'A'
     df.loc[(df['CumValuePct'] > 80) & (df['CumValuePct'] <= 95), 'ABC'] = 'B'
+    df['HighStrategicValue'] = (
+        (df['TotalInqAll'] >= 5000) |
+        (df['TotalSalesAll'] >= 500) |
+        (df['Inq_12M'] >= 2000)
+    )
 
     # ── XYZ: Demand variability ──
     def _cov(row):
@@ -671,11 +685,22 @@ def apply_abc_xyz(df):
         if combo == 'AZ':
             return 'REVIEW CLOSELY',     '#6f42c1', '⚠️ AZ → Never bulk buy. High value + erratic. Buy on confirmed order only.'
         if combo == 'CZ':
-            return 'DROP / DISCONTINUE', '#dc3545', '❌ CZ → Always DROP. Low value + erratic. Dead stock.'
+            strategic = bool(row.get('HighStrategicValue', False))
+            if strategic and dm == 'BUY':
+                return 'BUY (WATCH)', '#007bff', 'CZ but high market interest + BUY signal. Buy conservatively.'
+            if strategic:
+                return 'REVIEW OCCASIONALLY', '#888888', 'CZ but strategically important. Review before dropping.'
+            return 'DROP / DISCONTINUE', '#dc3545', 'CZ: Low value + erratic. No replenishment.'
         if combo in ('BY', 'BZ'):
-            return 'LIMIT BUY',          '#fd7e14', '⚖️ BY/BZ → Control tightly. Order-based purchasing only.'
+            strategic = bool(row.get('HighStrategicValue', False))
+            if dm == 'BUY' and strategic:
+                return 'BUY (CONTROLLED)', '#fd7e14', 'BY/BZ + high volume + BUY signal. Controlled buy, smaller lots.'
+            return 'LIMIT BUY', '#fd7e14', 'BY/BZ: Control tightly. Order-based purchasing only.'
         if combo == 'CX':
-            return 'HOLD / MINIMAL',     '#856404', '📦 CX → Keep minimal stock. Automate replenishment.'
+            strategic = bool(row.get('HighStrategicValue', False))
+            if dm == 'BUY' and strategic:
+                return 'BUY (CONTROLLED)', '#fd7e14', 'CX + high volume + BUY signal. Buy minimal, automate.'
+            return 'HOLD / MINIMAL', '#856404', 'CX: Keep minimal stock. Automate replenishment.'
 
         # For AY, BX, CY — cross with Decision Matrix
         if combo == 'AY':
@@ -2305,6 +2330,7 @@ def main():
 # ─────────────────────────────────────────────────────────────────
 # HELPER: Item detail panel
 # ─────────────────────────────────────────────────────────────────
+
 
 if __name__ == "__main__":
     main()
