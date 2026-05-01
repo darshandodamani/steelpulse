@@ -891,9 +891,10 @@ def main():
     # ─────────────────────────────────
     # TABS
     # ─────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📈 Forecast & Buy Signals",
         "📅 6-Month Projection",
+        "🎯 Procurement Board",
         "📊 Analytics",
         "📋 Balance Sheet",
         "🧠 Learning Dashboard",
@@ -1046,9 +1047,15 @@ def main():
 
 
     # ══════════════════════════════════════════════════════════════
-    # TAB 3 — ANALYTICS
+    # TAB 3 — PROCUREMENT BOARD
     # ══════════════════════════════════════════════════════════════
     with tab3:
+        _show_procurement_board(df)
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 4 — ANALYTICS
+    # ══════════════════════════════════════════════════════════════
+    with tab4:
         st.markdown("#### 📊 Analytics Dashboard")
 
         col_a, col_b = st.columns([3, 2])
@@ -1134,9 +1141,9 @@ def main():
 
 
     # ══════════════════════════════════════════════════════════════
-    # TAB 4 — BALANCE SHEET
+    # TAB 5 — BALANCE SHEET
     # ══════════════════════════════════════════════════════════════
-    with tab4:
+    with tab5:
         st.markdown("#### 📋 Year-wise Balance Sheet — Inquiry vs Sales vs Purchase")
 
         balance_rows = []
@@ -1198,15 +1205,15 @@ def main():
 
 
     # ══════════════════════════════════════════════════════════════
-    # TAB 5 — LEARNING DASHBOARD
+    # TAB 6 — LEARNING DASHBOARD
     # ══════════════════════════════════════════════════════════════
-    with tab5:
+    with tab6:
         _show_learning_dashboard(df)
 
     # ══════════════════════════════════════════════════════════════
-    # TAB 6 — ALGORITHM EXPLAINED
+    # TAB 7 — ALGORITHM EXPLAINED
     # ══════════════════════════════════════════════════════════════
-    with tab6:
+    with tab7:
         st.markdown("#### ⚙️ How the Algorithm Works")
 
         col1, col2 = st.columns(2)
@@ -1707,3 +1714,358 @@ def _show_learning_dashboard(result_df):
                 {'reduced' if cf<1 else 'boosted'} by <b>{cf:.2f}×</b> automatically.
                 </div>
                 """, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────
+# PROCUREMENT BOARD
+# ─────────────────────────────────────────────────────────────────
+def _procurement_board_filter(df):
+    """
+    Apply the 3 business conditions to identify real buy candidates.
+
+    Condition 1: HIGH INQUIRY
+        → Item must have inquiry >= 100 in at least 3 of the 6 years
+        → Means customer market is consistently interested
+
+    Condition 2: INQUIRY VOLUME
+        → Total inquiry across all years must be >= 100
+        → Filters out items with one-off tiny inquiries
+
+    Condition 3: LOW STOCK → NEED TO BUY
+        → Net available stock < 500 lengths
+        → Only buy if stock is running low
+
+    Condition 4: CONSISTENT SALES
+        → Sales recorded in at least 3 of 6 years
+        → Proves real consumption, not just inquiry noise
+    """
+    YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+
+    df = df.copy()
+    df['_inq_years_100plus'] = (df[[f'Inq_{y}' for y in YEARS]] >= 100).sum(axis=1)
+    df['_total_inq']         = df[[f'Inq_{y}' for y in YEARS]].sum(axis=1)
+    df['_sales_years_active']= (df[[f'Sales_{y}' for y in YEARS]] > 0).sum(axis=1)
+    df['_inq_years_active']  = (df[[f'Inq_{y}' for y in YEARS]] > 0).sum(axis=1)
+
+    cond1 = df['_inq_years_100plus'] >= 3   # 3+ years with inq >= 100
+    cond2 = df['_total_inq']         >= 100  # total inquiry meaningful
+    cond3 = df['NetAvailStock']       < 500  # stock below threshold
+    cond4 = df['_sales_years_active'] >= 3   # consistent sales
+
+    board = df[cond1 & cond2 & cond3 & cond4].copy()
+    board = board.sort_values('_total_inq', ascending=False)
+    return board
+
+
+def _show_procurement_board(df):
+    YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+
+    st.markdown("#### 🎯 Procurement Board")
+    st.markdown("""
+    <div style="background:#1A1A2E;border-radius:8px;padding:14px 18px;margin-bottom:16px">
+    <div style="color:#f0a500;font-weight:700;font-size:13px;margin-bottom:8px">
+    📋 Items shown here meet ALL 4 conditions:
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:12px;color:#ccc">
+      <div>✅ <b>Condition 1:</b> Inquiry ≥ 100 in 3+ of 6 years (consistent market demand)</div>
+      <div>✅ <b>Condition 2:</b> Total inquiry across all years ≥ 100 (meaningful volume)</div>
+      <div>✅ <b>Condition 3:</b> Net stock &lt; 500 lengths (running low — need to buy)</div>
+      <div>✅ <b>Condition 4:</b> Sales recorded in 3+ years (proven real consumption)</div>
+    </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    board = _procurement_board_filter(df)
+
+    if board.empty:
+        st.warning("No items meet all 4 conditions with current data.")
+        return
+
+    # ── Summary KPIs ──
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Items to Review", len(board),
+                  help="Items meeting all 4 procurement conditions")
+    with k2:
+        st.metric("Total Proposed Buy",
+                  f"{int(board.ProposedQty_6M.sum()):,} lengths",
+                  help="Sum of proposed purchase quantities")
+    with k3:
+        urgent = board[board.NetAvailStock <= 0]
+        st.metric("🔴 Zero Stock Items", len(urgent),
+                  help="Items with nothing on hand right now")
+    with k4:
+        est = board.EstCostUSD.sum()
+        st.metric("Est. Total Cost",
+                  f"${est/1000:.0f}K USD" if est > 0 else "N/A",
+                  help="Estimated procurement cost (priced items only)")
+
+    st.markdown("<div style='margin:10px 0'></div>", unsafe_allow_html=True)
+
+    # ── Main board table ──
+    board_display = board[[
+        'ItemCode', '_inq_years_100plus', '_total_inq',
+        '_sales_years_active', 'TotalSales',
+        'NetAvailStock', 'QOH', 'IncomingPO', 'OpenSO',
+        'Signal', 'Score', 'ProposedQty_6M', 'F6M_Mid',
+        'StockoutMonth', 'LeadTimeWeeks'
+    ]].copy()
+
+    board_display.columns = [
+        'Item Code', 'Inq Years ≥100', 'Total Inquiry (6yr)',
+        'Sales Years Active', 'Total Sales (6yr)',
+        'Net Stock', 'QOH', 'Incoming PO', 'Open SO',
+        'Signal', 'Score', 'Proposed Buy (6M)', '6M Demand',
+        'Stockout Month', 'Lead Wks'
+    ]
+    board_display = board_display.round(0)
+
+    def _color_board(row):
+        net = row['Net Stock']
+        sig = row['Signal']
+        if net <= 0:
+            return ['background-color:#ffe5e5'] * len(row)
+        elif sig == 'BUY':
+            return ['background-color:#d4edda'] * len(row)
+        elif sig == 'WATCH':
+            return ['background-color:#e8f4ff'] * len(row)
+        return [''] * len(row)
+
+    st.dataframe(
+        board_display.set_index('Item Code').style.apply(_color_board, axis=1),
+        use_container_width=True,
+        height=420
+    )
+    st.caption(
+        f"🔴 Red = zero stock · 🟢 Green = BUY signal · 🔵 Blue = WATCH · "
+        f"Showing {len(board)} items meeting all conditions"
+    )
+
+    # ── Click item → full trend detail ──
+    st.markdown("---")
+    st.markdown("#### 🔍 Item Detail — Sales Trend, Inquiry History & Stock Position")
+    st.caption("Select any item from the board above to see its full history")
+
+    selected = st.selectbox(
+        "Select item to inspect:",
+        board['ItemCode'].tolist(),
+        key="board_item_select"
+    )
+
+    if selected:
+        irow = df[df.ItemCode == selected].iloc[0]
+        _show_board_item_detail(irow, YEARS)
+
+
+def _show_board_item_detail(row, YEARS):
+    """Full detail panel for a procurement board item."""
+    item = row['ItemCode']
+    sig_color = SIGNAL_COLORS.get(str(row.Signal), "#888")
+
+    # ── Header cards ──
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.markdown(f"""
+        <div style="background:{sig_color}22;border:2px solid {sig_color};border-radius:8px;
+             padding:12px;text-align:center">
+          <div style="font-size:9px;color:#888;text-transform:uppercase;margin-bottom:2px">Signal</div>
+          <div style="font-size:22px;font-weight:800;color:{sig_color}">{row.Signal}</div>
+          <div style="font-size:11px;color:#888">Score: {row.Score:.0f}/100</div>
+        </div>""", unsafe_allow_html=True)
+    with c2:
+        qoh = int(row.get('QOH', 0))
+        color = '#cc0000' if qoh == 0 else '#155724'
+        st.markdown(f"""
+        <div style="background:#f8f9fa;border:1px solid #ddd;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:9px;color:#888;text-transform:uppercase;margin-bottom:2px">Stock On Hand</div>
+          <div style="font-size:22px;font-weight:800;color:{color}">{qoh:,}</div>
+          <div style="font-size:11px;color:#888">lengths</div>
+        </div>""", unsafe_allow_html=True)
+    with c3:
+        net = int(row.get('NetAvailStock', 0))
+        color = '#cc0000' if net <= 0 else ('#856404' if net < 100 else '#155724')
+        st.markdown(f"""
+        <div style="background:#f8f9fa;border:1px solid #ddd;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:9px;color:#888;text-transform:uppercase;margin-bottom:2px">Net Available</div>
+          <div style="font-size:22px;font-weight:800;color:{color}">{net:,}</div>
+          <div style="font-size:11px;color:#888">QOH + PO − Open SO</div>
+        </div>""", unsafe_allow_html=True)
+    with c4:
+        proposed = int(row.get('ProposedQty_6M', 0))
+        st.markdown(f"""
+        <div style="background:#d4edda;border:1px solid #28a745;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:9px;color:#888;text-transform:uppercase;margin-bottom:2px">Proposed Buy</div>
+          <div style="font-size:22px;font-weight:800;color:#155724">{proposed:,}</div>
+          <div style="font-size:11px;color:#888">lengths (6M cover)</div>
+        </div>""", unsafe_allow_html=True)
+    with c5:
+        stkout = str(row.get('StockoutMonth', 'None'))
+        bg = '#ffe5e5' if stkout != 'None' else '#d4edda'
+        fg = '#cc0000' if stkout != 'None' else '#155724'
+        msg = stkout if stkout != 'None' else '✅ Covered'
+        st.markdown(f"""
+        <div style="background:{bg};border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:9px;color:#888;text-transform:uppercase;margin-bottom:2px">Stockout Risk</div>
+          <div style="font-size:18px;font-weight:800;color:{fg}">{msg}</div>
+          <div style="font-size:11px;color:#888">6M projection</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='margin:12px 0'></div>", unsafe_allow_html=True)
+
+    # ── Two charts side by side ──
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        # Inquiry trend chart — BAR per year
+        st.markdown(f"**📊 Inquiry Trend — {item}**")
+        st.caption("How many customer inquiries received each year")
+
+        inq_data = pd.DataFrame({
+            'Year': [str(y) for y in YEARS],
+            'Inquiries': [float(row.get(f'Inq_{y}', 0)) for y in YEARS],
+        })
+        fig_inq = go.Figure()
+        colors_inq = [
+            '#28a745' if v >= 100 else '#ffc107' if v > 0 else '#e9ecef'
+            for v in inq_data['Inquiries']
+        ]
+        fig_inq.add_trace(go.Bar(
+            x=inq_data['Year'],
+            y=inq_data['Inquiries'],
+            marker_color=colors_inq,
+            text=inq_data['Inquiries'].apply(lambda x: f'{x:,.0f}'),
+            textposition='outside',
+            name='Inquiries'
+        ))
+        fig_inq.add_hline(
+            y=100, line_dash='dash', line_color='#dc3545',
+            annotation_text='100 threshold', annotation_position='top right'
+        )
+        fig_inq.update_layout(
+            height=300, plot_bgcolor='#fafafa',
+            yaxis_title='Inquiries (lengths)',
+            showlegend=False,
+            margin=dict(t=20, b=20)
+        )
+        st.plotly_chart(fig_inq, use_container_width=True)
+
+    with col_right:
+        # Sales trend chart — LINE
+        st.markdown(f"**📈 Sales Trend — {item}**")
+        st.caption("Confirmed sales / consumption each year")
+
+        sales_data = pd.DataFrame({
+            'Year': [str(y) for y in YEARS],
+            'Sales': [float(row.get(f'Sales_{y}', 0)) for y in YEARS],
+            'Purchase': [float(row.get(f'Purch_{y}', 0)) for y in YEARS],
+        })
+        fig_sales = go.Figure()
+        fig_sales.add_trace(go.Bar(
+            x=sales_data['Year'],
+            y=sales_data['Purchase'],
+            name='Purchased from Vendor',
+            marker_color='#f0a500',
+            opacity=0.7
+        ))
+        fig_sales.add_trace(go.Scatter(
+            x=sales_data['Year'],
+            y=sales_data['Sales'],
+            name='Sold to Customer',
+            mode='lines+markers',
+            line=dict(color='#28a745', width=3),
+            marker=dict(size=9, color='#28a745')
+        ))
+        fig_sales.update_layout(
+            height=300, plot_bgcolor='#fafafa',
+            yaxis_title='Lengths',
+            legend=dict(orientation='h', yanchor='bottom', y=1.02),
+            margin=dict(t=20, b=20)
+        )
+        st.plotly_chart(fig_sales, use_container_width=True)
+
+    # ── Year by year table ──
+    st.markdown(f"**📋 Full Year-by-Year History — {item}**")
+
+    yr_rows = []
+    for y in YEARS:
+        inq  = float(row.get(f'Inq_{y}',   0))
+        sal  = float(row.get(f'Sales_{y}',  0))
+        pur  = float(row.get(f'Purch_{y}',  0))
+        conv = round(sal / inq * 100, 1) if inq > 0 else 0
+        yr_rows.append({
+            'Year':              y,
+            'Inquiries':         int(inq),
+            'Sales (consumed)':  int(sal),
+            'Purchased':         int(pur),
+            'Conversion %':      conv,
+            'Inq ≥ 100?':       '✅ Yes' if inq >= 100 else '❌ No',
+            'Has Sales?':        '✅ Yes' if sal > 0 else '—',
+        })
+
+    yr_df = pd.DataFrame(yr_rows).set_index('Year')
+
+    def _color_yr(col):
+        if col.name == 'Inquiries':
+            return ['background-color:#d4edda' if v >= 100
+                    else 'background-color:#fff3cd' if v > 0
+                    else '' for v in col]
+        if col.name == 'Sales (consumed)':
+            return ['background-color:#d4edda' if v > 0 else '' for v in col]
+        return ['' for _ in col]
+
+    st.dataframe(
+        yr_df.style.apply(_color_yr, axis=0),
+        use_container_width=True
+    )
+
+    # ── Stock breakdown ──
+    st.markdown(f"**📦 Current Stock Breakdown — {item}**")
+    s1, s2, s3, s4, s5 = st.columns(5)
+    with s1: st.metric("QOH (physical)",   int(row.get('QOH', 0)))
+    with s2: st.metric("Open SO (reserved)", int(row.get('OpenSO', 0)))
+    with s3: st.metric("Available Stock",  int(row.get('AvailStock', 0)))
+    with s4: st.metric("Incoming PO",      int(row.get('IncomingPO', 0)))
+    with s5:
+        net = int(row.get('NetAvailStock', 0))
+        delta_color = "normal" if net >= 0 else "inverse"
+        st.metric("Net Available", net,
+                  delta=f"{'⚠️ Below 500' if 0 < net < 500 else ('🔴 Zero/Negative' if net <= 0 else '✅ OK')}",
+                  delta_color=delta_color)
+
+    # ── Decision box ──
+    net_stock = float(row.get('NetAvailStock', 0))
+    total_inq = float(row.get('TotalInquiry', 0))
+    sales_yrs = int((pd.Series([row.get(f'Sales_{y}', 0) for y in YEARS]) > 0).sum())
+    inq_yrs_100 = int((pd.Series([row.get(f'Inq_{y}', 0) for y in YEARS]) >= 100).sum())
+
+    cond1_ok = inq_yrs_100 >= 3
+    cond2_ok = total_inq >= 100
+    cond3_ok = net_stock < 500
+    cond4_ok = sales_yrs >= 3
+
+    all_ok = cond1_ok and cond2_ok and cond3_ok and cond4_ok
+
+    bg   = '#d4edda' if all_ok else '#fff3cd'
+    fg   = '#155724' if all_ok else '#856404'
+    icon = '🟢' if all_ok else '🟡'
+    decision = 'PROCURE FROM VENDOR' if all_ok else 'REVIEW MANUALLY'
+
+    st.markdown(f"""
+    <div style="background:{bg};border-radius:10px;padding:18px 22px;margin-top:16px;
+         border:2px solid {fg}">
+      <div style="font-size:18px;font-weight:800;color:{fg};margin-bottom:12px">
+        {icon} DECISION: {decision}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
+        <div>{'✅' if cond1_ok else '❌'} <b>Condition 1:</b> Inquiry ≥ 100 in {inq_yrs_100}/6 years
+             {'(need 3+)' if not cond1_ok else '(met ✓)'}</div>
+        <div>{'✅' if cond2_ok else '❌'} <b>Condition 2:</b> Total inquiry = {int(total_inq):,}
+             {'(need ≥100)' if not cond2_ok else '(met ✓)'}</div>
+        <div>{'✅' if cond3_ok else '❌'} <b>Condition 3:</b> Net stock = {int(net_stock):,}
+             {'(need <500)' if not cond3_ok else '(met ✓)'}</div>
+        <div>{'✅' if cond4_ok else '❌'} <b>Condition 4:</b> Sales in {sales_yrs}/6 years
+             {'(need 3+)' if not cond4_ok else '(met ✓)'}</div>
+      </div>
+      {f'<div style="margin-top:12px;font-size:13px;font-weight:700;color:{fg}">Proposed quantity to buy: {int(row.get("ProposedQty_6M",0)):,} lengths — covers next 6 months demand + safety buffer</div>' if all_ok else ''}
+    </div>
+    """, unsafe_allow_html=True)
