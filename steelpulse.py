@@ -589,6 +589,127 @@ def apply_decision_matrix(df):
     return df
 
 
+# ─────────────────────────────────────────────────────────────────
+# COMBINED ALGORITHM: ABC-XYZ + DECISION MATRIX + OVERRIDE RULES
+# ─────────────────────────────────────────────────────────────────
+def apply_abc_xyz(df):
+    """
+    Layer 1: ABC Classification (by total sales VALUE)
+      A = top 80% of cumulative value  → High value items
+      B = next 15% (80-95%)            → Medium value items
+      C = bottom 5% (95-100%)          → Low value items
+
+    Layer 2: XYZ Classification (by demand VARIABILITY)
+      Coefficient of Variation = StdDev / Mean of yearly sales
+      X = CoV ≤ 0.50  → Stable, predictable demand
+      Y = CoV 0.50-1.0 → Variable demand
+      Z = CoV > 1.0    → Erratic, unpredictable demand
+
+    Layer 3: Priority Override Rules (from client)
+      AX → Always BUY (Priority) - never allow stockout
+      AZ → Review Closely - never bulk buy, high value risk
+      CZ → Always DROP - dead stock, no replenishment
+      BY/BZ → Limit Buy - order-based only, control tightly
+      CX → Hold Minimal - keep small stock, automate
+
+    Layer 4: Decision Matrix intersection (for remaining combos)
+      Uses Swagelok Decision Matrix (Q/PO/Stock signals)
+      refined by ABC class for buy intensity
+    """
+    YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+    df = df.copy()
+
+    # ── ABC: Value classification ──
+    df['TotalValue'] = (df['TotalSales'] * df['PricePerLength'].clip(lower=0)).fillna(0)
+    df = df.sort_values('TotalValue', ascending=False).reset_index(drop=True)
+    total_val = df['TotalValue'].sum()
+    df['CumValuePct'] = df['TotalValue'].cumsum() / (total_val + 1e-9) * 100
+    df['ABC'] = 'C'
+    df.loc[df['CumValuePct'] <= 80, 'ABC'] = 'A'
+    df.loc[(df['CumValuePct'] > 80) & (df['CumValuePct'] <= 95), 'ABC'] = 'B'
+
+    # ── XYZ: Demand variability ──
+    def _cov(row):
+        vals = np.array([float(row.get(f'Sales_{y}', 0) or 0) for y in YEARS])
+        nonzero = vals[vals > 0]
+        if len(nonzero) < 2:
+            return 999.0  # erratic by default if < 2 data points
+        return float(np.std(nonzero) / (np.mean(nonzero) + 1e-9))
+
+    df['CoV'] = df.apply(_cov, axis=1)
+    df['XYZ'] = 'Z'
+    df.loc[df['CoV'] <= 0.50, 'XYZ'] = 'X'
+    df.loc[(df['CoV'] > 0.50) & (df['CoV'] <= 1.0), 'XYZ'] = 'Y'
+    df['ABC_XYZ'] = df['ABC'] + df['XYZ']
+
+    # ── 9-Box Action from matrix ──
+    abc_xyz_matrix = {
+        'AX': ('BUY (PRIORITY)',      '#155724', 'Maintain stock · Avoid stockouts'),
+        'AY': ('MONITOR / BUY',       '#007bff', 'Monthly review · Adjust safety stock'),
+        'AZ': ('REVIEW CLOSELY',      '#6f42c1', 'Buy against demand only · Avoid overstock'),
+        'BX': ('MONITOR',             '#0d6efd', 'Planned replenishment'),
+        'BY': ('REVIEW / BUY',        '#fd7e14', 'Smaller lot sizes · Controlled buy'),
+        'BZ': ('LIMIT BUY',           '#fd7e14', 'Order-based only · Control tightly'),
+        'CX': ('HOLD / MINIMAL',      '#856404', 'Minimal stock · Automate if possible'),
+        'CY': ('REVIEW OCCASIONALLY', '#888888', 'Avoid excess stock'),
+        'CZ': ('DROP / DISCONTINUE',  '#dc3545', 'No replenishment'),
+    }
+    df['ABC_Action'] = df['ABC_XYZ'].map(lambda k: abc_xyz_matrix.get(k, ('HOLD','#888','—'))[0])
+    df['ABC_Color']  = df['ABC_XYZ'].map(lambda k: abc_xyz_matrix.get(k, ('HOLD','#888','—'))[1])
+    df['ABC_Desc']   = df['ABC_XYZ'].map(lambda k: abc_xyz_matrix.get(k, ('HOLD','#888','—'))[2])
+
+    # ── FINAL DECISION: Override rules + DM intersection ──
+    def _final(row):
+        abc   = row['ABC']
+        xyz   = row['XYZ']
+        dm    = row.get('DM_Action', 'DROP')
+        combo = abc + xyz
+
+        # Priority overrides (non-negotiable)
+        if combo == 'AX':
+            return 'BUY (PRIORITY)',     '#155724', '🔥 AX → Always BUY. High value + stable. Never stockout.'
+        if combo == 'AZ':
+            return 'REVIEW CLOSELY',     '#6f42c1', '⚠️ AZ → Never bulk buy. High value + erratic. Buy on confirmed order only.'
+        if combo == 'CZ':
+            return 'DROP / DISCONTINUE', '#dc3545', '❌ CZ → Always DROP. Low value + erratic. Dead stock.'
+        if combo in ('BY', 'BZ'):
+            return 'LIMIT BUY',          '#fd7e14', '⚖️ BY/BZ → Control tightly. Order-based purchasing only.'
+        if combo == 'CX':
+            return 'HOLD / MINIMAL',     '#856404', '📦 CX → Keep minimal stock. Automate replenishment.'
+
+        # For AY, BX, CY — cross with Decision Matrix
+        if combo == 'AY':
+            if dm == 'BUY':    return 'BUY (PRIORITY)',  '#155724', 'AY + BUY signal → High value, adjust safety stock now'
+            if dm == 'REVIEW': return 'MONITOR / BUY',   '#007bff', 'AY + REVIEW → Monthly review, prepare to buy'
+            return 'MONITOR / BUY', '#007bff', 'AY → Monthly review, adjust safety stock'
+
+        if combo == 'BX':
+            if dm == 'BUY':    return 'BUY',     '#28a745', 'BX + BUY signal → Planned replenishment needed now'
+            return 'MONITOR',  '#007bff', 'BX → Planned replenishment, watch stock level'
+
+        if combo == 'CY':
+            if dm == 'BUY':    return 'BUY (CONTROLLED)', '#fd7e14', 'CY + BUY signal → Low value but market active, buy conservatively'
+            if dm == 'REVIEW': return 'REVIEW OCCASIONALLY', '#888888', 'CY + REVIEW → Avoid excess, review with sales'
+            return 'REVIEW OCCASIONALLY', '#888888', 'CY → Occasional review, avoid excess stock'
+
+        # Fallback to DM
+        dm_map = {
+            'BUY':     ('BUY',     '#28a745'),
+            'MONITOR': ('MONITOR', '#007bff'),
+            'HOLD':    ('HOLD',    '#856404'),
+            'REVIEW':  ('REVIEW',  '#6f42c1'),
+            'DROP':    ('DROP',    '#dc3545'),
+        }
+        action, color = dm_map.get(dm, ('HOLD', '#888'))
+        return action, color, f'{combo} → {dm} (Decision Matrix)'
+
+    final_cols = df.apply(_final, axis=1, result_type='expand')
+    final_cols.columns = ['Final_Action', 'Final_Color', 'Final_Reason']
+    df = pd.concat([df, final_cols], axis=1)
+
+    return df
+
+
 @st.cache_data(show_spinner=False)
 def run_full_analysis(file_bytes, filename):
     buf    = io.BytesIO(file_bytes)
@@ -598,6 +719,8 @@ def run_full_analysis(file_bytes, filename):
     result = run_forecast(scored)
     # Apply Swagelok Decision Matrix
     result = apply_decision_matrix(result)
+    # Apply ABC-XYZ + Combined Algorithm
+    result = apply_abc_xyz(result)
     # Apply learned correction factors if available
     if is_bootstrapped():
         corrections = get_correction_factors()
@@ -950,6 +1073,9 @@ def _show_forecast_chart(row):
     with c4: st.metric("Stockout Risk",     str(row.StockoutMonth) if row.HasStockoutRisk else "✅ None")
 
 
+
+
+
 # ─────────────────────────────────────────────────────────────────
 # LEARNING DASHBOARD
 # ─────────────────────────────────────────────────────────────────
@@ -1204,160 +1330,184 @@ def _show_learning_dashboard(result_df):
 # PROCUREMENT BOARD
 # ─────────────────────────────────────────────────────────────────
 def _procurement_board_filter(df):
-    """
-    Uses Swagelok Decision Matrix as primary filter.
-    Shows BUY + REVIEW items sorted by 12-month inquiry volume.
-    Also adds legacy conditions as additional context columns.
-    """
-    YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+    """Uses Final_Action from combined ABC-XYZ + Decision Matrix algorithm."""
     df = df.copy()
-    df['_inq_years_100plus'] = (df[[f'Inq_{y}' for y in YEARS]] >= 100).sum(axis=1)
-    df['_total_inq']         = df[[f'Inq_{y}' for y in YEARS]].sum(axis=1)
-    df['_sales_years_active']= (df[[f'Sales_{y}' for y in YEARS]] > 0).sum(axis=1)
-
-    # Primary: use Decision Matrix
-    if 'DM_Action' in df.columns:
+    if 'Final_Action' in df.columns:
+        # Show all actionable items (not DROP/DISCONTINUE)
+        board = df[~df['Final_Action'].isin(['DROP / DISCONTINUE','DROP'])].copy()
+    elif 'DM_Action' in df.columns:
         board = df[df['DM_Action'].isin(['BUY','MONITOR','REVIEW'])].copy()
     else:
-        # Fallback to original conditions
-        cond1 = df['_inq_years_100plus'] >= 3
-        cond2 = df['_total_inq']         >= 100
-        cond3 = df['NetAvailStock']       < 500
-        cond4 = df['_sales_years_active'] >= 3
-        board = df[cond1 & cond2 & cond3 & cond4].copy()
-
-    board = board.sort_values('Inq_12M' if 'Inq_12M' in board.columns else '_total_inq',
-                              ascending=False)
+        board = df[df['Signal'].isin(['BUY','WATCH'])].copy()
+    sort_col = 'Inq_12M' if 'Inq_12M' in board.columns else 'TotalInquiry'
+    board = board.sort_values(sort_col, ascending=False)
     return board
 
 
 def _show_procurement_board(df):
     YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+    st.markdown("#### 🎯 Procurement Board — ABC-XYZ + Decision Matrix")
 
-    st.markdown("#### 🎯 Procurement Board — Swagelok Decision Matrix")
+    # ── Algorithm explanation ──
+    with st.expander("📖 How this algorithm works — click to expand", expanded=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("""
+            **Layer 1 — ABC (Value)**
+            - **A** = Top 80% of total sales value → High value
+            - **B** = Next 15% (80–95%) → Medium value
+            - **C** = Bottom 5% → Low value
 
-    # Matrix legend
-    st.markdown("""
-    <div style="background:#1A1A2E;border-radius:8px;padding:16px 20px;margin-bottom:16px">
-      <div style="color:#f0a500;font-weight:700;font-size:13px;margin-bottom:10px">
-        📋 Swagelok Decision Matrix — Applied to Past 12 Months Data
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:11px;color:#ccc;margin-bottom:10px">
-        <div>📊 <b>Quotation:</b> High = inquiry &gt; 100 pcs (12M)</div>
-        <div>📦 <b>PO Received:</b> High = conversion &gt; 50%</div>
-        <div>🏭 <b>Stock:</b> High = net stock &gt; 50% of 12M sales</div>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-size:11px">
-        <div style="background:#28a74522;border:1px solid #28a745;border-radius:4px;padding:6px">
-          🟢 <b>BUY</b>: High Q + High PO + Low Stock<br>
-          <span style="color:#aaa">Immediate replenishment needed</span>
-        </div>
-        <div style="background:#28a74522;border:1px solid #fd7e14;border-radius:4px;padding:6px">
-          🟢 <b>BUY*</b>: High Q + Low PO + Low Stock<br>
-          <span style="color:#aaa">Buy + review with Sales & Costing</span>
-        </div>
-        <div style="background:#007bff22;border:1px solid #007bff;border-radius:4px;padding:6px">
-          🔵 <b>MONITOR</b>: High Q + High PO + High Stock<br>
-          <span style="color:#aaa">Watch only, no action</span>
-        </div>
-        <div style="background:#85640422;border:1px solid #856404;border-radius:4px;padding:6px">
-          🟡 <b>HOLD</b>: Low Q + Low PO + High Stock<br>
-          <span style="color:#aaa">Avoid buying, manage existing</span>
-        </div>
-        <div style="background:#6f42c122;border:1px solid #6f42c1;border-radius:4px;padding:6px">
-          👁️ <b>REVIEW</b>: High Q + Low PO + High Stock<br>
-          <span style="color:#aaa">Defer buying, monitor interest</span>
-        </div>
-        <div style="background:#dc354522;border:1px solid #dc3545;border-radius:4px;padding:6px">
-          ⛔ <b>DROP</b>: Low Q + Low PO + Low Stock<br>
-          <span style="color:#aaa">Discontinue or review with Sales</span>
-        </div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+            **Layer 2 — XYZ (Demand Pattern)**
+            - **X** = CoV ≤ 0.5 → Stable, predictable demand
+            - **Y** = CoV 0.5–1.0 → Variable demand
+            - **Z** = CoV > 1.0 → Erratic, unpredictable
+            """)
+        with col2:
+            st.markdown("""
+            **Layer 3 — Priority Override Rules**
+            - 🔥 **AX** → Always BUY (never stockout)
+            - ⚠️ **AZ** → Never bulk buy (high risk)
+            - ❌ **CZ** → Always DROP (dead stock)
+            - ⚖️ **BY/BZ** → Control tightly, order-based
+            - 📦 **CX** → Keep minimal stock
 
+            **Layer 4 — Decision Matrix (for remaining)**
+            Swagelok Q/PO/Stock signals applied per class
+            """)
+
+        # 9-box grid
+        st.markdown("**9-Box Decision Matrix:**")
+        matrix_html = """
+        <table style='width:100%;border-collapse:collapse;font-size:11px;text-align:center'>
+        <tr style='background:#1A1A2E;color:#fff'>
+          <th style='padding:6px'>ABC / XYZ</th>
+          <th style='padding:6px'>X (Stable)</th>
+          <th style='padding:6px'>Y (Variable)</th>
+          <th style='padding:6px'>Z (Erratic)</th>
+        </tr>
+        <tr>
+          <td style='background:#1A1A2E;color:#fff;font-weight:700;padding:6px'>A (High Value)</td>
+          <td style='background:#d4edda;color:#155724;font-weight:700;padding:8px'>🔥 BUY (PRIORITY)<br><small>Avoid stockouts</small></td>
+          <td style='background:#cce5ff;color:#004085;padding:8px'>📊 MONITOR/BUY<br><small>Monthly review</small></td>
+          <td style='background:#ede7f6;color:#4a148c;padding:8px'>👁️ REVIEW CLOSELY<br><small>Buy vs demand only</small></td>
+        </tr>
+        <tr>
+          <td style='background:#1A1A2E;color:#fff;font-weight:700;padding:6px'>B (Medium Value)</td>
+          <td style='background:#cce5ff;color:#004085;padding:8px'>🔵 MONITOR<br><small>Planned replenishment</small></td>
+          <td style='background:#fff3cd;color:#856404;padding:8px'>⚖️ REVIEW/BUY<br><small>Smaller lots</small></td>
+          <td style='background:#ffe8d0;color:#7d3c00;padding:8px'>⚖️ LIMIT BUY<br><small>Order-based only</small></td>
+        </tr>
+        <tr>
+          <td style='background:#1A1A2E;color:#fff;font-weight:700;padding:6px'>C (Low Value)</td>
+          <td style='background:#fff3cd;color:#856404;padding:8px'>📦 HOLD/MINIMAL<br><small>Keep minimal</small></td>
+          <td style='background:#f0f0f0;color:#555;padding:8px'>🔍 REVIEW OCC.<br><small>Avoid excess</small></td>
+          <td style='background:#f8d7da;color:#721c24;font-weight:700;padding:8px'>❌ DROP<br><small>No replenishment</small></td>
+        </tr>
+        </table>
+        """
+        st.markdown(matrix_html, unsafe_allow_html=True)
+
+    # ── KPIs ──
     board = _procurement_board_filter(df)
+    if 'Final_Action' in board.columns:
+        pri_buy  = board[board.Final_Action=='BUY (PRIORITY)']
+        buy      = board[board.Final_Action.isin(['BUY','BUY (PRIORITY)','MONITOR / BUY','BUY (CONTROLLED)','REVIEW / BUY'])]
+        review   = board[board.Final_Action.isin(['REVIEW CLOSELY','REVIEW','REVIEW OCCASIONALLY','REVIEW / BUY'])]
+        monitor  = board[board.Final_Action.isin(['MONITOR','MONITOR / BUY'])]
+        limit    = board[board.Final_Action.isin(['LIMIT BUY','HOLD / MINIMAL'])]
+    else:
+        pri_buy = buy = review = monitor = limit = pd.DataFrame()
 
-    # KPIs
-    buy_items  = board[board.DM_Action=='BUY']   if 'DM_Action' in board.columns else board
-    mon_items  = board[board.DM_Action=='MONITOR'] if 'DM_Action' in board.columns else pd.DataFrame()
-    rev_items  = board[board.DM_Action=='REVIEW']  if 'DM_Action' in board.columns else pd.DataFrame()
-
-    k1,k2,k3,k4,k5 = st.columns(5)
-    with k1: st.metric("🟢 BUY",     len(buy_items),  help="Needs immediate procurement")
-    with k2: st.metric("🔵 MONITOR", len(mon_items),   help="Watch only")
-    with k3: st.metric("👁️ REVIEW",  len(rev_items),   help="High interest, defer buying")
-    with k4: st.metric("Total in View", len(board))
-    with k5:
-        qty = int(buy_items.ProposedQty_6M.sum()) if len(buy_items) > 0 else 0
-        st.metric("Proposed Buy Qty", f"{qty:,} lengths")
+    k1,k2,k3,k4,k5,k6 = st.columns(6)
+    with k1: st.metric("🔥 BUY (Priority)", len(pri_buy), help="AX items — never allow stockout")
+    with k2: st.metric("🟢 All BUY signals", len(buy),    help="All items needing procurement")
+    with k3: st.metric("👁️ Review",          len(review),  help="Monitor closely before buying")
+    with k4: st.metric("🔵 Monitor",         len(monitor), help="Watch only, no immediate action")
+    with k5: st.metric("⚖️ Limit/Minimal",   len(limit),   help="Controlled buying only")
+    with k6:
+        total_qty = int(buy.ProposedQty_6M.sum()) if not buy.empty and 'ProposedQty_6M' in buy.columns else 0
+        st.metric("Proposed Qty", f"{total_qty:,}", help="Total lengths to procure")
 
     st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
 
-    # Filter tabs
-    view_filter = st.radio(
-        "Show items:",
-        ["🟢 BUY (action required)", "👁️ REVIEW (monitor)", "🔵 MONITOR", "All"],
-        horizontal=True, key="dm_filter"
+    # ── Filter ──
+    view_opt = st.radio(
+        "Filter by action:",
+        ["🔥 BUY Priority (AX)", "🟢 All BUY", "👁️ Review", "🔵 Monitor", "⚖️ Limit/Control", "📋 All Actionable"],
+        horizontal=True, key="abc_filter"
     )
-    if "BUY" in view_filter:
-        show_df = buy_items
-    elif "REVIEW" in view_filter:
-        show_df = rev_items
-    elif "MONITOR" in view_filter:
-        show_df = mon_items
-    else:
-        show_df = board
+    if "Priority" in view_opt:   show_df = pri_buy
+    elif "All BUY" in view_opt:  show_df = buy
+    elif "Review"  in view_opt:  show_df = review
+    elif "Monitor" in view_opt:  show_df = monitor
+    elif "Limit"   in view_opt:  show_df = limit
+    else:                         show_df = board
 
     if show_df.empty:
         st.info("No items in this category.")
-    else:
-        # Build display table
-        disp_cols = {
-            'ItemCode':      'Item Code',
-            'DM_Action':     'Decision',
-            'Q_Label':       'Quotation',
-            'PO_Label':      'PO Received',
-            'Stock_Label':   'Stock Avail.',
-            'Inq_12M':       'Inquiry 12M',
-            'Conv_12M':      'Conv. Rate',
-            'Sales_12M':     'Sales 12M',
-            'NetAvailStock': 'Net Stock',
-            'ProposedQty_6M':'Proposed Buy',
-            'F6M_Mid':       '6M Demand',
-            'StockoutMonth': 'Stockout In',
-            'DM_Reason':     'Interpretation',
-        }
-        avail = [c for c in disp_cols if c in show_df.columns]
-        disp = show_df[avail].rename(columns=disp_cols).copy()
-        if 'Inquiry 12M' in disp.columns: disp['Inquiry 12M']  = disp['Inquiry 12M'].round(0).astype(int)
-        if 'Sales 12M'   in disp.columns: disp['Sales 12M']    = disp['Sales 12M'].round(0).astype(int)
-        if 'Conv. Rate'  in disp.columns: disp['Conv. Rate']   = (disp['Conv. Rate']*100).round(1).astype(str) + '%'
-        if 'Net Stock'   in disp.columns: disp['Net Stock']    = disp['Net Stock'].round(0).astype(int)
-        if 'Proposed Buy' in disp.columns: disp['Proposed Buy']= disp['Proposed Buy'].round(0).astype(int)
-        if '6M Demand'   in disp.columns: disp['6M Demand']    = disp['6M Demand'].round(1)
+        return
 
-        def _color_dm(row):
-            action = row.get('Decision','')
-            if action == 'BUY':     return ['background-color:#d4edda'] * len(row)
-            if action == 'MONITOR': return ['background-color:#cce5ff'] * len(row)
-            if action == 'REVIEW':  return ['background-color:#ede7f6'] * len(row)
-            if action == 'HOLD':    return ['background-color:#fff3cd'] * len(row)
-            return [''] * len(row)
+    # ── Table ──
+    want = ['ItemCode','ABC_XYZ','Final_Action','DM_Action',
+            'Q_Label','PO_Label','Stock_Label',
+            'Inq_12M','Conv_12M','Sales_12M',
+            'TotalValue','NetAvailStock','ProposedQty_6M',
+            'F6M_Mid','StockoutMonth','CoV','Final_Reason']
+    avail = [c for c in want if c in show_df.columns]
+    disp  = show_df[avail].copy()
+    rename = {
+        'ItemCode':'Item Code','ABC_XYZ':'Class','Final_Action':'Decision',
+        'DM_Action':'Mkt Signal','Q_Label':'Quotation','PO_Label':'PO Recv.',
+        'Stock_Label':'Stock','Inq_12M':'Inq 12M','Conv_12M':'Conv %',
+        'Sales_12M':'Sales 12M','TotalValue':'Total Value ($)',
+        'NetAvailStock':'Net Stock','ProposedQty_6M':'Proposed Buy',
+        'F6M_Mid':'6M Demand','StockoutMonth':'Stockout','CoV':'CoV',
+        'Final_Reason':'Reason'
+    }
+    disp = disp.rename(columns={k:v for k,v in rename.items() if k in disp.columns})
+    if 'Conv %'    in disp: disp['Conv %']         = (disp['Conv %']*100).round(1).astype(str)+'%'
+    if 'Inq 12M'  in disp: disp['Inq 12M']        = disp['Inq 12M'].round(0).astype(int)
+    if 'Sales 12M'in disp: disp['Sales 12M']       = disp['Sales 12M'].round(0).astype(int)
+    if 'Net Stock' in disp: disp['Net Stock']      = disp['Net Stock'].round(0).astype(int)
+    if 'Proposed Buy' in disp: disp['Proposed Buy']= disp['Proposed Buy'].round(0).astype(int)
+    if 'Total Value ($)' in disp: disp['Total Value ($)'] = disp['Total Value ($)'].apply(lambda x: f"${x:,.0f}")
+    if 'CoV' in disp: disp['CoV'] = disp['CoV'].round(2)
 
-        st.dataframe(
-            disp.set_index('Item Code').style.apply(_color_dm, axis=1),
-            use_container_width=True, height=440
-        )
-        st.caption(f"Showing {len(show_df)} items · Based on past 12 months data (2025 + annualised 2026)")
+    ACTION_COLORS = {
+        'BUY (PRIORITY)':     '#d4edda',
+        'BUY':                '#d4edda',
+        'MONITOR / BUY':      '#cce5ff',
+        'BUY (CONTROLLED)':   '#fff3cd',
+        'REVIEW / BUY':       '#fff3cd',
+        'MONITOR':            '#cce5ff',
+        'REVIEW CLOSELY':     '#ede7f6',
+        'REVIEW':             '#ede7f6',
+        'REVIEW OCCASIONALLY':'#f0f0f0',
+        'LIMIT BUY':          '#ffe8d0',
+        'HOLD / MINIMAL':     '#fff3cd',
+    }
+
+    def _color_row(row):
+        action = row.get('Decision','')
+        bg = ACTION_COLORS.get(action, '')
+        return [f'background-color:{bg}'] * len(row) if bg else [''] * len(row)
+
+    st.dataframe(
+        disp.set_index('Item Code').style.apply(_color_row, axis=1),
+        use_container_width=True, height=460
+    )
+    st.caption(
+        f"Showing {len(show_df)} items · "
+        f"🔥 Priority BUY = AX class · Colors: green=buy · blue=monitor · purple=review · orange=limited"
+    )
 
     # ── Item detail ──
     st.markdown("---")
-    st.markdown("#### 🔍 Item Detail — Click to Inspect")
-
-    all_items = board['ItemCode'].tolist() if not board.empty else []
+    st.markdown("#### 🔍 Item Detail")
+    all_items = show_df['ItemCode'].tolist() if not show_df.empty else []
     if all_items:
-        selected = st.selectbox("Select item:", all_items, key="board_item_select")
+        selected = st.selectbox("Select item to inspect:", all_items, key="board_item_select")
         if selected:
             irow = df[df.ItemCode == selected].iloc[0]
             _show_board_item_detail(irow, YEARS)
