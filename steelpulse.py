@@ -736,584 +736,6 @@ def _kpi_card(label, value, color, icon=""):
     </div>""", unsafe_allow_html=True)
 
 
-def main():
-    init_db()   # ensure SQLite tables exist
-    st.set_page_config(
-        page_title="SteelPulse — Procurement Intelligence",
-        page_icon="🔩",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-
-    # ── Global CSS ──
-    st.markdown("""
-    <style>
-    #MainMenu,footer {visibility:hidden}
-    .block-container {padding-top:1rem;padding-bottom:1rem}
-    .stDataFrame {font-size:12px}
-    div[data-testid="metric-container"] {
-        background:#fff;border:1px solid #e0e0e0;border-radius:8px;
-        padding:10px 14px;border-top:3px solid #2D3561
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # ── Header ──
-    st.markdown("""
-    <div style="background:#1A1A2E;padding:16px 24px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
-      <span style="font-size:28px;font-weight:800;color:#fff">🔩 Steel<span style="color:#f0a500">Pulse</span></span>
-      <span style="color:#555;font-size:13px">| Procurement Intelligence Platform</span>
-      <span style="margin-left:auto;color:#888;font-size:11px">WMSPS Algorithm + TWMAP 6-Month Forecast</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ─────────────────────────────────
-    # SIDEBAR
-    # ─────────────────────────────────
-    with st.sidebar:
-        st.markdown("### 📁 Upload SAP Export")
-        uploaded = st.file_uploader(
-            "Drop your .xlsx file here",
-            type=["xlsx","xls"],
-            help="Upload the SAP Excel export containing: Quotation-Table, SO-Table, Purchase-Table, Tubing Stock balance, 144 PRICE sheets"
-        )
-
-        st.markdown("---")
-        st.markdown("### 🔍 Filters")
-        filter_signal = st.multiselect("Signal", ["BUY","WATCH","HOLD","SKIP"], default=[])
-        filter_class  = st.multiselect("Item Class", ["FAST_MOVER","SLOW_MOVER","PROJECT","DEAD"], default=[])
-        filter_risk   = st.checkbox("⚠️ Stockout Risk Only", value=False)
-        search_term   = st.text_input("Search Item Code", placeholder="e.g. SS-T8-S-065")
-
-        st.markdown("---")
-        st.markdown("### 📖 Required Sheets")
-        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance","144 PRICE"]:
-            st.markdown(f"- `{s}`")
-
-        st.markdown("---")
-        st.markdown("""
-        <div style='font-size:11px;color:#888'>
-        <b>Algorithm:</b> WMSPS<br>
-        S1 Velocity 35% · S2 Conversion 25%<br>
-        S3 Coverage 25% · S4 Open SO 15%<br><br>
-        <b>Forecast:</b> TWMAP<br>
-        Base × Trend × Inquiry Boost × Decay
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── No file state ──
-    if uploaded is None:
-        st.markdown("""
-        <div style="text-align:center;padding:80px 20px;background:#111318;border-radius:12px;border:2px dashed #444">
-          <div style="font-size:60px;margin-bottom:16px">🔩</div>
-          <div style="font-size:24px;font-weight:700;color:#ffffff;margin-bottom:8px">Upload your SAP Excel export to begin</div>
-          <div style="font-size:14px;color:#aaa">Drag and drop your .xlsx file in the sidebar<br>
-          The algorithm will process all sheets automatically</div>
-          <br>
-          <div style="display:inline-block;background:#1A1A2E;border-radius:8px;padding:20px 36px;margin-top:8px;text-align:left;border:1px solid #333">
-            <div style="color:#f0a500;font-weight:700;margin-bottom:10px;font-size:14px">What you get:</div>
-            <div style="color:#fff;font-size:13px;line-height:2">
-            ✅ &nbsp;Procurement Score (0–100) per item<br>
-            ✅ &nbsp;BUY / WATCH / HOLD / SKIP signals<br>
-            ✅ &nbsp;6-Month demand forecast with confidence bands<br>
-            ✅ &nbsp;Stockout risk detection per item<br>
-            ✅ &nbsp;Proposed purchase quantity (lengths)<br>
-            ✅ &nbsp;Professional Excel report — 5 sheets
-            </div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
-        return
-
-    # ── Run analysis ──
-    with st.spinner("⚙️ Running WMSPS algorithm + TWMAP 6-month forecast..."):
-        try:
-            file_bytes = uploaded.read()
-            df = run_full_analysis(file_bytes, uploaded.name)
-        except Exception as e:
-            st.error(f"❌ Error processing file: {str(e)}")
-            st.info("💡 Make sure your file contains: Quotation-Table, SO-Table/TSO Table, Purchase-Table/TP History, Tubing Stock balance, and 144 PRICE sheets.")
-            st.stop()
-
-    summary = compute_summary(df)
-
-    # ── Bootstrap learning on first upload ──
-    upload_id = f"UPLOAD_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    if not is_bootstrapped():
-        with st.spinner("🧠 Initialising learning model from 6 years of history..."):
-            n = bootstrap_from_history(df)
-            save_forecast_snapshot(df, upload_id, uploaded.name, summary)
-        st.success(f"✅ Learning model initialised — {n} items learned from 2021–2024 data, validated on 2025")
-        st.cache_data.clear()
-        df = run_full_analysis(file_bytes, uploaded.name)
-        summary = compute_summary(df)
-    else:
-        # Update learning with new upload data
-        update_from_new_upload(df, upload_id)
-        save_forecast_snapshot(df, upload_id, uploaded.name, summary)
-
-    # ── Apply sidebar filters ──
-    filtered = df.copy()
-    if filter_signal: filtered = filtered[filtered.Signal.isin(filter_signal)]
-    if filter_class:  filtered = filtered[filtered.ItemClass.isin(filter_class)]
-    if filter_risk:   filtered = filtered[filtered.HasStockoutRisk == True]
-    if search_term:   filtered = filtered[filtered.ItemCode.str.contains(search_term, case=False, na=False)]
-
-    # ── Export button ──
-    col_exp, col_info = st.columns([2, 8])
-    with col_exp:
-        excel_buf = build_excel_export(df)
-        st.download_button(
-            label="⬇️ Export Excel Report",
-            data=excel_buf,
-            file_name=f"SteelPulse_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-        )
-    with col_info:
-        st.caption(f"📁 {uploaded.name} · {summary['total']} items processed · {len(filtered)} shown after filters")
-
-    # ─────────────────────────────────
-    # KPI ROW
-    # ─────────────────────────────────
-    c1,c2,c3,c4,c5,c6,c7,c8 = st.columns(8)
-    with c1: st.metric("Total Items",   f"{summary['total']:,}")
-    with c2: st.metric("🟢 BUY",         summary['buy'],    help="Order immediately")
-    with c3: st.metric("🔵 WATCH",       summary['watch'],  help="Prepare to order")
-    with c4: st.metric("🟡 HOLD",        summary['hold'],   help="Monitor monthly")
-    with c5: st.metric("⛔ SKIP",        summary['skip'],   help="Do not order")
-    with c6: st.metric("⚠️ Stockout Risk", summary['stockout_risk'], help="Stock runs out within 6 months")
-    with c7: st.metric("🛒 Proposed Qty", f"{summary['proposed_qty']:,}", help="Lengths to buy (6M cover)")
-    with c8: st.metric("💵 Est. Cost",   f"${summary['est_cost_usd']/1000:.0f}K", help="USD (priced items only)")
-
-    st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
-
-    # ─────────────────────────────────
-    # TABS
-    # ─────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "📈 Forecast & Buy Signals",
-        "📅 6-Month Projection",
-        "🎯 Procurement Board",
-        "📊 Analytics",
-        "📋 Balance Sheet",
-        "🧠 Learning Dashboard",
-        "⚙️ Algorithm Explained",
-    ])
-
-    # ══════════════════════════════════════════════════════════════
-    # TAB 1 — FORECAST & BUY SIGNALS
-    # ══════════════════════════════════════════════════════════════
-    with tab1:
-        st.markdown("#### 🛒 Procurement Signals — Click any row for full detail")
-
-        # Urgency alerts
-        critical = df[(df.Signal=="BUY") & (df.StockoutMonth.isin([MONTH_LABELS[0], MONTH_LABELS[1]]))]
-        if len(critical) > 0:
-            st.error(f"🔴 **{len(critical)} items** will stock out in the next 2 months ({MONTH_LABELS[0]}, {MONTH_LABELS[1]}) — ORDER IMMEDIATELY")
-
-        open_so_risk = df[(df.OpenSO > df.AvailStock) & (df.TotalSales > 0)]
-        if len(open_so_risk) > 0:
-            st.warning(f"🟠 **{len(open_so_risk)} items** have Open SO exceeding Available Stock — customer deliveries at risk")
-
-        # Build display table
-        display_cols = {
-            "ItemCode":       "Item Code",
-            "ItemClass":      "Class",
-            "Signal":         "Signal",
-            "Score":          "Score",
-            "F6M_Mid":        "6M Demand (Mid)",
-            "F6M_Low":        "6M Low",
-            "F6M_High":       "6M High",
-            "NetStock_Now":   "Net Stock",
-            "StockEnd_Mid":   "Stock End (Mid)",
-            "StockoutMonth":  "Stockout In",
-            "ProposedQty_6M": "Proposed Buy",
-            "EstCostUSD":     "Est Cost (USD)",
-            "ForecastConf":   "Confidence",
-            "TrendMult":      "Trend ×",
-            "LeadTimeWeeks":  "Lead Wks",
-        }
-
-        tbl = filtered[list(display_cols.keys())].rename(columns=display_cols).copy()
-        tbl["Score"] = tbl["Score"].round(1)
-        tbl["Est Cost (USD)"] = tbl["Est Cost (USD)"].apply(
-            lambda x: f"${x:,.0f}" if x > 0 else "—"
-        )
-        tbl["Stock End (Mid)"] = tbl["Stock End (Mid)"].round(1)
-        tbl["6M Demand (Mid)"] = tbl["6M Demand (Mid)"].round(1)
-        tbl["Trend ×"] = tbl["Trend ×"].round(2)
-
-        def highlight_row(row):
-            sig = row["Signal"]
-            if sig == "BUY":
-                return ["background-color:#d4edda;color:#155724"] * len(row)
-            elif sig == "WATCH":
-                return ["background-color:#e8f4ff;color:#004085"] * len(row)
-            elif sig == "HOLD":
-                return ["background-color:#fffde7;color:#856404"] * len(row)
-            elif row.get("Stockout In","None") != "None":
-                return ["background-color:#fff5f5;color:#cc0000"] * len(row)
-            return [""] * len(row)
-
-        sorted_tbl = tbl.sort_values("Score", ascending=False)
-        st.dataframe(sorted_tbl, use_container_width=True, height=520)
-
-        st.caption(f"Showing {len(filtered):,} items · Green = BUY · Blue = WATCH · Red background = Stockout risk · Click column header to sort")
-
-        # ── Item detail expander ──
-        st.markdown("---")
-        st.markdown("#### 🔎 Item Deep Dive")
-        item_list = filtered[filtered.Signal.isin(["BUY","WATCH"])]["ItemCode"].tolist()
-        if not item_list:
-            item_list = filtered["ItemCode"].tolist()
-
-        if item_list:
-            selected = st.selectbox("Select an item to inspect:", item_list)
-            if selected:
-                irow = df[df.ItemCode == selected].iloc[0]
-                _show_item_detail(irow)
-
-
-    # ══════════════════════════════════════════════════════════════
-    # TAB 2 — 6-MONTH PROJECTION
-    # ══════════════════════════════════════════════════════════════
-    with tab2:
-        st.markdown("#### 📅 6-Month Forward Demand Forecast")
-        st.caption(f"Forecast months: **{' → '.join(MONTH_LABELS)}** · Method: TWMAP (Trend-Weighted Moving Average Projection)")
-
-        # ── Aggregate chart for BUY items ──
-        buy_items = df[df.Signal == "BUY"]
-        if len(buy_items) > 0:
-            agg = pd.DataFrame({
-                "Month": MONTH_LABELS,
-                "Low":  [buy_items[f"Proj_Low_{m}"].sum()  for m in MONTH_LABELS],
-                "Mid":  [buy_items[f"Proj_Mid_{m}"].sum()  for m in MONTH_LABELS],
-                "High": [buy_items[f"Proj_High_{m}"].sum() for m in MONTH_LABELS],
-            })
-
-            fig = go.Figure()
-            fig.add_trace(go.Bar(name="Mid Forecast", x=agg.Month, y=agg.Mid,
-                                 marker_color="#007bff", opacity=0.85))
-            fig.add_trace(go.Scatter(name="High (+30%)", x=agg.Month, y=agg.High,
-                                     mode="lines+markers", line=dict(color="#28a745", dash="dash", width=2),
-                                     marker=dict(size=6)))
-            fig.add_trace(go.Scatter(name="Low (−25%)", x=agg.Month, y=agg.Low,
-                                     mode="lines+markers", line=dict(color="#dc3545", dash="dash", width=2),
-                                     marker=dict(size=6), fill="tonexty", fillcolor="rgba(200,230,255,0.15)"))
-            fig.update_layout(title="Aggregate 6-Month Demand — All BUY Items (lengths)",
-                              xaxis_title="Month", yaxis_title="Lengths",
-                              height=340, plot_bgcolor="#fafafa",
-                              legend=dict(orientation="h", yanchor="bottom", y=1.02))
-            st.plotly_chart(fig, use_container_width=True)
-
-        # ── Stockout risk table ──
-        st.markdown("#### ⚠️ Stockout Risk Items")
-        risk_df = df[df.HasStockoutRisk == True].copy()
-        risk_df = risk_df.sort_values("StockoutMonth")
-
-        if len(risk_df) == 0:
-            st.success("✅ No stockout risk detected in the next 6 months")
-        else:
-            st.error(f"**{len(risk_df)} items** at risk of stocking out within 6 months")
-
-            risk_cols = ["ItemCode","Signal","NetStock_Now","F6M_Mid","StockEnd_Mid",
-                         "StockoutMonth","ProposedQty_6M"] + [f"Proj_Mid_{m}" for m in MONTH_LABELS]
-            risk_display = risk_df[risk_cols].copy()
-            risk_display.columns = (
-                ["Item Code","Signal","Net Stock","6M Demand","Stock End","Stockout In","Buy Now"] +
-                [f"{m}" for m in MONTH_LABELS]
-            )
-            risk_display = risk_display.round(1)
-
-            def highlight_risk(row):
-                mo = str(row.get("Stockout In","None"))
-                if mo in [MONTH_LABELS[0], MONTH_LABELS[1]]:
-                    return ["background-color:#ffe5e5;font-weight:bold"] * len(row)
-                return ["background-color:#fff8e1"] * len(row)
-
-            st.dataframe(risk_display, use_container_width=True, height=420)
-            st.caption("Red rows = stock out within 2 months. Yellow = 3–6 months.")
-
-        # ── Per-item forecast chart ──
-        st.markdown("---")
-        st.markdown("#### 🔍 Per-Item 6-Month Forecast")
-        item_sel2 = st.selectbox(
-            "Select item:", df[df.TotalSales > 0]["ItemCode"].tolist(), key="fc_item"
-        )
-        if item_sel2:
-            irow2 = df[df.ItemCode == item_sel2].iloc[0]
-            _show_forecast_chart(irow2)
-
-
-    # ══════════════════════════════════════════════════════════════
-    # TAB 3 — PROCUREMENT BOARD
-    # ══════════════════════════════════════════════════════════════
-    with tab3:
-        _show_procurement_board(df)
-
-    # ══════════════════════════════════════════════════════════════
-    # TAB 4 — ANALYTICS
-    # ══════════════════════════════════════════════════════════════
-    with tab4:
-        st.markdown("#### 📊 Analytics Dashboard")
-
-        col_a, col_b = st.columns([3, 2])
-
-        with col_a:
-            # Annual trend chart
-            annual_df = pd.DataFrame([
-                {"Year": yr, "Type": "Inquiry",  "Quantity": summary["annual"][yr]["inq"]}
-                for yr in YEARS
-            ] + [
-                {"Year": yr, "Type": "Sales",    "Quantity": summary["annual"][yr]["sales"]}
-                for yr in YEARS
-            ] + [
-                {"Year": yr, "Type": "Purchase", "Quantity": summary["annual"][yr]["purch"]}
-                for yr in YEARS
-            ])
-            fig2 = px.bar(annual_df, x="Year", y="Quantity", color="Type", barmode="group",
-                          color_discrete_map={"Inquiry":"#007bff","Sales":"#28a745","Purchase":"#f0a500"},
-                          title="Annual Inquiry vs Sales vs Purchase (all items · lengths)")
-            fig2.update_layout(height=320, plot_bgcolor="#fafafa")
-            st.plotly_chart(fig2, use_container_width=True)
-
-            # Conversion rate trend
-            conv_df = pd.DataFrame([{
-                "Year": yr,
-                "Conversion %": round(
-                    summary["annual"][yr]["sales"] / (summary["annual"][yr]["inq"]+1) * 100, 2
-                )
-            } for yr in YEARS])
-            fig3 = px.line(conv_df, x="Year", y="Conversion %",
-                           title="Inquiry-to-Sales Conversion Rate (%)",
-                           markers=True, color_discrete_sequence=["#fd7e14"])
-            fig3.update_layout(height=260, plot_bgcolor="#fafafa")
-            st.plotly_chart(fig3, use_container_width=True)
-
-        with col_b:
-            # Signal pie
-            pie_data = pd.DataFrame({
-                "Signal": ["BUY","WATCH","HOLD","SKIP"],
-                "Count": [summary["buy"],summary["watch"],summary["hold"],summary["skip"]]
-            })
-            fig4 = px.pie(pie_data, values="Count", names="Signal",
-                          color="Signal",
-                          color_discrete_map={"BUY":"#28a745","WATCH":"#007bff","HOLD":"#ffc107","SKIP":"#dc3545"},
-                          title="Signal Distribution")
-            fig4.update_traces(textposition="inside", textinfo="percent+label")
-            fig4.update_layout(height=280, showlegend=False)
-            st.plotly_chart(fig4, use_container_width=True)
-
-            # Class breakdown
-            class_data = pd.DataFrame({
-                "Class": ["FAST MOVER","SLOW MOVER","PROJECT","DEAD"],
-                "Count": [summary["fast"],summary["slow"],summary["project"],summary["dead"]]
-            })
-            fig5 = px.bar(class_data, x="Count", y="Class", orientation="h",
-                          color="Class",
-                          color_discrete_map={"FAST MOVER":"#28a745","SLOW MOVER":"#007bff",
-                                              "PROJECT":"#fd7e14","DEAD":"#6c757d"},
-                          title="Item Classification")
-            fig5.update_layout(height=250, showlegend=False, plot_bgcolor="#fafafa",
-                               yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig5, use_container_width=True)
-
-        # Top items by proposed qty
-        st.markdown("#### 🏆 Top Items by Proposed Purchase Quantity")
-        top_df = df[df.ProposedQty_6M > 0].nlargest(15, "ProposedQty_6M")[
-            ["ItemCode","Signal","ItemClass","ProposedQty_6M","F6M_Mid",
-             "NetStock_Now","StockoutMonth","LeadTimeWeeks","PricePerLength","EstCostUSD"]
-        ].copy()
-        top_df.columns = ["Item Code","Signal","Class","Proposed Qty","6M Demand",
-                          "Net Stock","Stockout","Lead Wks","Price/Len","Est Cost USD"]
-        top_df["Est Cost USD"] = top_df["Est Cost USD"].apply(lambda x: f"${x:,.0f}" if x > 0 else "—")
-        top_df = top_df.round(1)
-
-        fig6 = px.bar(top_df.head(15), x="Proposed Qty", y="Item Code",
-                      orientation="h", color="Signal",
-                      color_discrete_map={"BUY":"#28a745","WATCH":"#007bff","HOLD":"#ffc107","SKIP":"#dc3545"},
-                      title="Top 15 Items — Proposed Purchase Quantity (lengths)")
-        fig6.update_layout(height=400, plot_bgcolor="#fafafa",
-                           yaxis=dict(autorange="reversed"), showlegend=True)
-        st.plotly_chart(fig6, use_container_width=True)
-        st.dataframe(top_df.set_index("Item Code"), use_container_width=True)
-
-
-    # ══════════════════════════════════════════════════════════════
-    # TAB 5 — BALANCE SHEET
-    # ══════════════════════════════════════════════════════════════
-    with tab5:
-        st.markdown("#### 📋 Year-wise Balance Sheet — Inquiry vs Sales vs Purchase")
-
-        balance_rows = []
-        for yr in YEARS:
-            inq   = summary["annual"][yr]["inq"]
-            sales = summary["annual"][yr]["sales"]
-            purch = summary["annual"][yr]["purch"]
-            conv  = round(sales/(inq+1)*100, 2) if inq > 0 else 0
-            balance_rows.append({
-                "Year": yr,
-                "Inquiries (lengths)": inq,
-                "Sales / Consumption (lengths)": sales,
-                "Purchases from Vendor (lengths)": purch,
-                "Conversion Rate %": conv,
-                "Net Position (Purch − Sales)": purch - sales,
-            })
-
-        bal_df = pd.DataFrame(balance_rows).set_index("Year")
-
-        def style_balance(val, col):
-            if col == "Net Position (Purch − Sales)":
-                return "color:#155724;font-weight:bold" if val >= 0 else "color:#cc0000;font-weight:bold"
-            return ""
-
-        st.dataframe(bal_df, use_container_width=True)
-
-        # Balance waterfall
-        fig7 = make_subplots(specs=[[{"secondary_y": True}]])
-        yrs_str = [str(y) for y in YEARS]
-        fig7.add_trace(go.Bar(name="Inquiries", x=yrs_str,
-                              y=[summary["annual"][y]["inq"]   for y in YEARS],
-                              marker_color="#007bff", opacity=0.7))
-        fig7.add_trace(go.Bar(name="Sales",     x=yrs_str,
-                              y=[summary["annual"][y]["sales"] for y in YEARS],
-                              marker_color="#28a745", opacity=0.9))
-        fig7.add_trace(go.Bar(name="Purchase",  x=yrs_str,
-                              y=[summary["annual"][y]["purch"] for y in YEARS],
-                              marker_color="#f0a500", opacity=0.9))
-        fig7.add_trace(go.Scatter(
-            name="Conv Rate %", x=yrs_str,
-            y=[round(summary["annual"][y]["sales"]/(summary["annual"][y]["inq"]+1)*100,2) for y in YEARS],
-            mode="lines+markers", line=dict(color="#dc3545",width=2),
-            marker=dict(size=8)
-        ), secondary_y=True)
-        fig7.update_layout(barmode="group", height=380, plot_bgcolor="#fafafa",
-                           title="6-Year History — Inquiry / Sales / Purchase + Conversion Rate")
-        fig7.update_yaxes(title_text="Lengths",       secondary_y=False)
-        fig7.update_yaxes(title_text="Conv Rate (%)", secondary_y=True)
-        st.plotly_chart(fig7, use_container_width=True)
-
-        # Stock position table
-        st.markdown("#### 📦 Current Stock Position")
-        stock_df = df[["ItemCode","QOH","OpenSO","AvailStock","IncomingPO",
-                        "NetAvailStock","ItemClass","Signal","StockCoverDays"]].copy()
-        stock_df = stock_df[stock_df.QOH > 0].sort_values("QOH", ascending=False)
-        stock_df.columns = ["Item","QOH","Open SO","Avail Stock","Incoming PO",
-                             "Net Avail","Class","Signal","Cover Days"]
-        st.dataframe(stock_df.set_index("Item"), use_container_width=True, height=400)
-
-
-    # ══════════════════════════════════════════════════════════════
-    # TAB 6 — LEARNING DASHBOARD
-    # ══════════════════════════════════════════════════════════════
-    with tab6:
-        _show_learning_dashboard(df)
-
-    # ══════════════════════════════════════════════════════════════
-    # TAB 7 — ALGORITHM EXPLAINED
-    # ══════════════════════════════════════════════════════════════
-    with tab7:
-        st.markdown("#### ⚙️ How the Algorithm Works")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("""
-            <div style="background:#f8f9fa;border-radius:10px;padding:20px;border-left:4px solid #1A1A2E">
-            <h4 style="color:#1A1A2E;margin-top:0">🧮 WMSPS — Procurement Scoring</h4>
-            <p style="color:#555;font-size:13px">
-            <b>Weighted Multi-Signal Procurement Scoring</b> gives each item a
-            0–100 score from 4 independent signals, then derives a buy/watch/hold/skip decision.
-            </p>
-            </div>
-            """, unsafe_allow_html=True)
-
-            for title, pct, desc, color, detail in [
-                ("🔵 S1 — Sales Velocity", "35%",
-                 "Is demand growing or dying?",
-                 "#007bff",
-                 "Weighted least-squares regression across 6 years. Years 2025–2026 carry 2×–3× more weight than 2021. A positive slope = growing sales = high score. Items with zero recent sales score near 0."),
-                ("🟣 S2 — Inquiry Conversion", "25%",
-                 "Do inquiries turn into orders?",
-                 "#6f42c1",
-                 "Conversion Rate = Total Sales ÷ Total Inquiries. High recent inquiry volume adds a boost. This catches items where demand is building but not yet converted (project pipeline)."),
-                ("🟠 S3 — Stock Coverage", "25%",
-                 "How many months of stock remain vs lead time?",
-                 "#fd7e14",
-                 "Coverage = NET Stock ÷ Avg Monthly Sales. Lead-time aware: if stock covers less than lead time → score 95–100 (will stockout before PO arrives). Zero stock = score 100 (critical)."),
-                ("🔴 S4 — Open SO Pressure", "15%",
-                 "Are booked customer orders at risk?",
-                 "#dc3545",
-                 "% of Open Sales Orders uncovered by Available Stock. If Open SO > Stock → customer commitments are at risk → forces BUY signal regardless of score."),
-            ]:
-                with st.expander(f"{title} — Weight: {pct}  ·  {desc}"):
-                    st.markdown(f"""
-                    <div style="border-left:3px solid {color};padding:8px 12px;font-size:13px;color:#444">
-                    {detail}
-                    </div>""", unsafe_allow_html=True)
-
-            st.markdown("""
-            <div style="background:#1A1A2E;color:#fff;padding:12px 16px;border-radius:6px;font-family:monospace;font-size:13px;margin-top:12px">
-            Score = S1×0.35 + S2×0.25 + S3×0.25 + S4×0.15<br><br>
-            🟢 BUY   → Score ≥ 60  (or Open SO > Available Stock)<br>
-            🔵 WATCH → Score 40–59<br>
-            🟡 HOLD  → Score 20–39<br>
-            ⛔ SKIP  → Score &lt; 20 or DEAD item
-            </div>
-            """, unsafe_allow_html=True)
-
-        with col2:
-            st.markdown("""
-            <div style="background:#f8f9fa;border-radius:10px;padding:20px;border-left:4px solid #007bff">
-            <h4 style="color:#1A1A2E;margin-top:0">📅 TWMAP — 6-Month Forecast</h4>
-            <p style="color:#555;font-size:13px">
-            <b>Trend-Weighted Moving Average Projection</b> computes month-by-month
-            demand for the next 6 months using 3 multiplied signals.
-            </p>
-            </div>
-            """, unsafe_allow_html=True)
-
-            for step, title, color, detail in [
-                ("1","Base Monthly Rate","#2D3561",
-                 "Weighted average annual sales ÷ 12. Only years with actual sales are included (zeros excluded from average). Recent years weighted 2×–3× more. 2026 data is annualised from partial-year actuals."),
-                ("2","YoY Trend Multiplier","#007bff",
-                 "Compares recent 2-year sales (2025+2026) vs prior 2-year (2023+2024). If demand doubled → multiplier = 2.0×. If demand halved → 0.5×. Capped at 0.5×–2.0× to prevent extreme projections."),
-                ("3","Inquiry Momentum Boost","#6f42c1",
-                 "Recent inquiry volume vs 6-year average. High recent inquiry = demand pipeline building = boost up to 1.5×. Low recent inquiry = pullback = down to 0.8×."),
-                ("4","Monthly Decay Factor","#fd7e14",
-                 "Months further in the future are less certain. Decay: 1.00, 0.98, 0.96, 0.94, 0.92, 0.90. Low band = Mid × 0.75. High band = Mid × 1.30."),
-            ]:
-                with st.expander(f"Step {step}: {title}"):
-                    st.markdown(f"""
-                    <div style="border-left:3px solid {color};padding:8px 12px;font-size:13px;color:#444">
-                    {detail}
-                    </div>""", unsafe_allow_html=True)
-
-            st.markdown("""
-            <div style="background:#1A1A2E;color:#fff;padding:12px 16px;border-radius:6px;font-family:monospace;font-size:13px;margin-top:12px">
-            Monthly[i] = Base × Trend × InqBoost × Decay[i]<br>
-            Low  = Mid × 0.75 &nbsp;|&nbsp; High = Mid × 1.30<br><br>
-            NET Stock = QOH + Incoming PO − Open SO<br>
-            BuyNow = max(0, 6M Total + Safety − NET Stock)<br>
-            Safety Buffer = 1 month of base forecast<br><br>
-            Confidence: HIGH = sales 4+ yrs · MED = 2-3 yrs · LOW = 1 yr
-            </div>
-            """, unsafe_allow_html=True)
-
-            st.markdown("##### 📦 Item Classification Rules")
-            class_rules = pd.DataFrame([
-                ["FAST MOVER",  "Sales in 3+ of the 6 years", "Standard 6M cover + 2mo safety"],
-                ["SLOW MOVER",  "Sales in 1–2 years only",    "6M cover + 1mo safety"],
-                ["PROJECT",     "1 big spike year, quiet rest","6M cover + 1mo (manual review)"],
-                ["DEAD",        "Zero sales, <3 total inquiries","Never buy — score forced to 0"],
-            ], columns=["Class","Trigger","Buy Logic"])
-            st.dataframe(class_rules.set_index("Class"), use_container_width=True)
-
-
-# ─────────────────────────────────────────────────────────────────
-# HELPER: Item detail panel
-# ─────────────────────────────────────────────────────────────────
 def _show_item_detail(row):
     sig_color = SIGNAL_COLORS.get(str(row.Signal), "#888")
     cls_color = CLASS_COLORS.get(str(row.ItemClass), "#888")
@@ -2069,3 +1491,583 @@ def _show_board_item_detail(row, YEARS):
       {f'<div style="margin-top:12px;font-size:13px;font-weight:700;color:{fg}">Proposed quantity to buy: {int(row.get("ProposedQty_6M",0)):,} lengths — covers next 6 months demand + safety buffer</div>' if all_ok else ''}
     </div>
     """, unsafe_allow_html=True)
+
+
+def main():
+    init_db()   # ensure SQLite tables exist
+    st.set_page_config(
+        page_title="SteelPulse — Procurement Intelligence",
+        page_icon="🔩",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    # ── Global CSS ──
+    st.markdown("""
+    <style>
+    #MainMenu,footer {visibility:hidden}
+    .block-container {padding-top:1rem;padding-bottom:1rem}
+    .stDataFrame {font-size:12px}
+    div[data-testid="metric-container"] {
+        background:#fff;border:1px solid #e0e0e0;border-radius:8px;
+        padding:10px 14px;border-top:3px solid #2D3561
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── Header ──
+    st.markdown("""
+    <div style="background:#1A1A2E;padding:16px 24px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
+      <span style="font-size:28px;font-weight:800;color:#fff">🔩 Steel<span style="color:#f0a500">Pulse</span></span>
+      <span style="color:#555;font-size:13px">| Procurement Intelligence Platform</span>
+      <span style="margin-left:auto;color:#888;font-size:11px">WMSPS Algorithm + TWMAP 6-Month Forecast</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ─────────────────────────────────
+    # SIDEBAR
+    # ─────────────────────────────────
+    with st.sidebar:
+        st.markdown("### 📁 Upload SAP Export")
+        uploaded = st.file_uploader(
+            "Drop your .xlsx file here",
+            type=["xlsx","xls"],
+            help="Upload the SAP Excel export containing: Quotation-Table, SO-Table, Purchase-Table, Tubing Stock balance, 144 PRICE sheets"
+        )
+
+        st.markdown("---")
+        st.markdown("### 🔍 Filters")
+        filter_signal = st.multiselect("Signal", ["BUY","WATCH","HOLD","SKIP"], default=[])
+        filter_class  = st.multiselect("Item Class", ["FAST_MOVER","SLOW_MOVER","PROJECT","DEAD"], default=[])
+        filter_risk   = st.checkbox("⚠️ Stockout Risk Only", value=False)
+        search_term   = st.text_input("Search Item Code", placeholder="e.g. SS-T8-S-065")
+
+        st.markdown("---")
+        st.markdown("### 📖 Required Sheets")
+        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance","144 PRICE"]:
+            st.markdown(f"- `{s}`")
+
+        st.markdown("---")
+        st.markdown("""
+        <div style='font-size:11px;color:#888'>
+        <b>Algorithm:</b> WMSPS<br>
+        S1 Velocity 35% · S2 Conversion 25%<br>
+        S3 Coverage 25% · S4 Open SO 15%<br><br>
+        <b>Forecast:</b> TWMAP<br>
+        Base × Trend × Inquiry Boost × Decay
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── No file state ──
+    if uploaded is None:
+        st.markdown("""
+        <div style="text-align:center;padding:80px 20px;background:#111318;border-radius:12px;border:2px dashed #444">
+          <div style="font-size:60px;margin-bottom:16px">🔩</div>
+          <div style="font-size:24px;font-weight:700;color:#ffffff;margin-bottom:8px">Upload your SAP Excel export to begin</div>
+          <div style="font-size:14px;color:#aaa">Drag and drop your .xlsx file in the sidebar<br>
+          The algorithm will process all sheets automatically</div>
+          <br>
+          <div style="display:inline-block;background:#1A1A2E;border-radius:8px;padding:20px 36px;margin-top:8px;text-align:left;border:1px solid #333">
+            <div style="color:#f0a500;font-weight:700;margin-bottom:10px;font-size:14px">What you get:</div>
+            <div style="color:#fff;font-size:13px;line-height:2">
+            ✅ &nbsp;Procurement Score (0–100) per item<br>
+            ✅ &nbsp;BUY / WATCH / HOLD / SKIP signals<br>
+            ✅ &nbsp;6-Month demand forecast with confidence bands<br>
+            ✅ &nbsp;Stockout risk detection per item<br>
+            ✅ &nbsp;Proposed purchase quantity (lengths)<br>
+            ✅ &nbsp;Professional Excel report — 5 sheets
+            </div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    # ── Run analysis ──
+    with st.spinner("⚙️ Running WMSPS algorithm + TWMAP 6-month forecast..."):
+        try:
+            file_bytes = uploaded.read()
+            df = run_full_analysis(file_bytes, uploaded.name)
+        except Exception as e:
+            st.error(f"❌ Error processing file: {str(e)}")
+            st.info("💡 Make sure your file contains: Quotation-Table, SO-Table/TSO Table, Purchase-Table/TP History, Tubing Stock balance, and 144 PRICE sheets.")
+            st.stop()
+
+    summary = compute_summary(df)
+
+    # ── Bootstrap learning on first upload ──
+    upload_id = f"UPLOAD_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    if not is_bootstrapped():
+        with st.spinner("🧠 Initialising learning model from 6 years of history..."):
+            n = bootstrap_from_history(df)
+            save_forecast_snapshot(df, upload_id, uploaded.name, summary)
+        st.success(f"✅ Learning model initialised — {n} items learned from 2021–2024 data, validated on 2025")
+        st.cache_data.clear()
+        df = run_full_analysis(file_bytes, uploaded.name)
+        summary = compute_summary(df)
+    else:
+        # Update learning with new upload data
+        update_from_new_upload(df, upload_id)
+        save_forecast_snapshot(df, upload_id, uploaded.name, summary)
+
+    # ── Apply sidebar filters ──
+    filtered = df.copy()
+    if filter_signal: filtered = filtered[filtered.Signal.isin(filter_signal)]
+    if filter_class:  filtered = filtered[filtered.ItemClass.isin(filter_class)]
+    if filter_risk:   filtered = filtered[filtered.HasStockoutRisk == True]
+    if search_term:   filtered = filtered[filtered.ItemCode.str.contains(search_term, case=False, na=False)]
+
+    # ── Export button ──
+    col_exp, col_info = st.columns([2, 8])
+    with col_exp:
+        excel_buf = build_excel_export(df)
+        st.download_button(
+            label="⬇️ Export Excel Report",
+            data=excel_buf,
+            file_name=f"SteelPulse_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
+    with col_info:
+        st.caption(f"📁 {uploaded.name} · {summary['total']} items processed · {len(filtered)} shown after filters")
+
+    # ─────────────────────────────────
+    # KPI ROW
+    # ─────────────────────────────────
+    c1,c2,c3,c4,c5,c6,c7,c8 = st.columns(8)
+    with c1: st.metric("Total Items",   f"{summary['total']:,}")
+    with c2: st.metric("🟢 BUY",         summary['buy'],    help="Order immediately")
+    with c3: st.metric("🔵 WATCH",       summary['watch'],  help="Prepare to order")
+    with c4: st.metric("🟡 HOLD",        summary['hold'],   help="Monitor monthly")
+    with c5: st.metric("⛔ SKIP",        summary['skip'],   help="Do not order")
+    with c6: st.metric("⚠️ Stockout Risk", summary['stockout_risk'], help="Stock runs out within 6 months")
+    with c7: st.metric("🛒 Proposed Qty", f"{summary['proposed_qty']:,}", help="Lengths to buy (6M cover)")
+    with c8: st.metric("💵 Est. Cost",   f"${summary['est_cost_usd']/1000:.0f}K", help="USD (priced items only)")
+
+    st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
+
+    # ─────────────────────────────────
+    # TABS
+    # ─────────────────────────────────
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "📈 Forecast & Buy Signals",
+        "📅 6-Month Projection",
+        "🎯 Procurement Board",
+        "📊 Analytics",
+        "📋 Balance Sheet",
+        "🧠 Learning Dashboard",
+        "⚙️ Algorithm Explained",
+    ])
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 1 — FORECAST & BUY SIGNALS
+    # ══════════════════════════════════════════════════════════════
+    with tab1:
+        st.markdown("#### 🛒 Procurement Signals — Click any row for full detail")
+
+        # Urgency alerts
+        critical = df[(df.Signal=="BUY") & (df.StockoutMonth.isin([MONTH_LABELS[0], MONTH_LABELS[1]]))]
+        if len(critical) > 0:
+            st.error(f"🔴 **{len(critical)} items** will stock out in the next 2 months ({MONTH_LABELS[0]}, {MONTH_LABELS[1]}) — ORDER IMMEDIATELY")
+
+        open_so_risk = df[(df.OpenSO > df.AvailStock) & (df.TotalSales > 0)]
+        if len(open_so_risk) > 0:
+            st.warning(f"🟠 **{len(open_so_risk)} items** have Open SO exceeding Available Stock — customer deliveries at risk")
+
+        # Build display table
+        display_cols = {
+            "ItemCode":       "Item Code",
+            "ItemClass":      "Class",
+            "Signal":         "Signal",
+            "Score":          "Score",
+            "F6M_Mid":        "6M Demand (Mid)",
+            "F6M_Low":        "6M Low",
+            "F6M_High":       "6M High",
+            "NetStock_Now":   "Net Stock",
+            "StockEnd_Mid":   "Stock End (Mid)",
+            "StockoutMonth":  "Stockout In",
+            "ProposedQty_6M": "Proposed Buy",
+            "EstCostUSD":     "Est Cost (USD)",
+            "ForecastConf":   "Confidence",
+            "TrendMult":      "Trend ×",
+            "LeadTimeWeeks":  "Lead Wks",
+        }
+
+        tbl = filtered[list(display_cols.keys())].rename(columns=display_cols).copy()
+        tbl["Score"] = tbl["Score"].round(1)
+        tbl["Est Cost (USD)"] = tbl["Est Cost (USD)"].apply(
+            lambda x: f"${x:,.0f}" if x > 0 else "—"
+        )
+        tbl["Stock End (Mid)"] = tbl["Stock End (Mid)"].round(1)
+        tbl["6M Demand (Mid)"] = tbl["6M Demand (Mid)"].round(1)
+        tbl["Trend ×"] = tbl["Trend ×"].round(2)
+
+        def highlight_row(row):
+            sig = row["Signal"]
+            if sig == "BUY":
+                return ["background-color:#d4edda;color:#155724"] * len(row)
+            elif sig == "WATCH":
+                return ["background-color:#e8f4ff;color:#004085"] * len(row)
+            elif sig == "HOLD":
+                return ["background-color:#fffde7;color:#856404"] * len(row)
+            elif row.get("Stockout In","None") != "None":
+                return ["background-color:#fff5f5;color:#cc0000"] * len(row)
+            return [""] * len(row)
+
+        sorted_tbl = tbl.sort_values("Score", ascending=False)
+        st.dataframe(sorted_tbl, use_container_width=True, height=520)
+
+        st.caption(f"Showing {len(filtered):,} items · Green = BUY · Blue = WATCH · Red background = Stockout risk · Click column header to sort")
+
+        # ── Item detail expander ──
+        st.markdown("---")
+        st.markdown("#### 🔎 Item Deep Dive")
+        item_list = filtered[filtered.Signal.isin(["BUY","WATCH"])]["ItemCode"].tolist()
+        if not item_list:
+            item_list = filtered["ItemCode"].tolist()
+
+        if item_list:
+            selected = st.selectbox("Select an item to inspect:", item_list)
+            if selected:
+                irow = df[df.ItemCode == selected].iloc[0]
+                _show_item_detail(irow)
+
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 2 — 6-MONTH PROJECTION
+    # ══════════════════════════════════════════════════════════════
+    with tab2:
+        st.markdown("#### 📅 6-Month Forward Demand Forecast")
+        st.caption(f"Forecast months: **{' → '.join(MONTH_LABELS)}** · Method: TWMAP (Trend-Weighted Moving Average Projection)")
+
+        # ── Aggregate chart for BUY items ──
+        buy_items = df[df.Signal == "BUY"]
+        if len(buy_items) > 0:
+            agg = pd.DataFrame({
+                "Month": MONTH_LABELS,
+                "Low":  [buy_items[f"Proj_Low_{m}"].sum()  for m in MONTH_LABELS],
+                "Mid":  [buy_items[f"Proj_Mid_{m}"].sum()  for m in MONTH_LABELS],
+                "High": [buy_items[f"Proj_High_{m}"].sum() for m in MONTH_LABELS],
+            })
+
+            fig = go.Figure()
+            fig.add_trace(go.Bar(name="Mid Forecast", x=agg.Month, y=agg.Mid,
+                                 marker_color="#007bff", opacity=0.85))
+            fig.add_trace(go.Scatter(name="High (+30%)", x=agg.Month, y=agg.High,
+                                     mode="lines+markers", line=dict(color="#28a745", dash="dash", width=2),
+                                     marker=dict(size=6)))
+            fig.add_trace(go.Scatter(name="Low (−25%)", x=agg.Month, y=agg.Low,
+                                     mode="lines+markers", line=dict(color="#dc3545", dash="dash", width=2),
+                                     marker=dict(size=6), fill="tonexty", fillcolor="rgba(200,230,255,0.15)"))
+            fig.update_layout(title="Aggregate 6-Month Demand — All BUY Items (lengths)",
+                              xaxis_title="Month", yaxis_title="Lengths",
+                              height=340, plot_bgcolor="#fafafa",
+                              legend=dict(orientation="h", yanchor="bottom", y=1.02))
+            st.plotly_chart(fig, use_container_width=True)
+
+        # ── Stockout risk table ──
+        st.markdown("#### ⚠️ Stockout Risk Items")
+        risk_df = df[df.HasStockoutRisk == True].copy()
+        risk_df = risk_df.sort_values("StockoutMonth")
+
+        if len(risk_df) == 0:
+            st.success("✅ No stockout risk detected in the next 6 months")
+        else:
+            st.error(f"**{len(risk_df)} items** at risk of stocking out within 6 months")
+
+            risk_cols = ["ItemCode","Signal","NetStock_Now","F6M_Mid","StockEnd_Mid",
+                         "StockoutMonth","ProposedQty_6M"] + [f"Proj_Mid_{m}" for m in MONTH_LABELS]
+            risk_display = risk_df[risk_cols].copy()
+            risk_display.columns = (
+                ["Item Code","Signal","Net Stock","6M Demand","Stock End","Stockout In","Buy Now"] +
+                [f"{m}" for m in MONTH_LABELS]
+            )
+            risk_display = risk_display.round(1)
+
+            def highlight_risk(row):
+                mo = str(row.get("Stockout In","None"))
+                if mo in [MONTH_LABELS[0], MONTH_LABELS[1]]:
+                    return ["background-color:#ffe5e5;font-weight:bold"] * len(row)
+                return ["background-color:#fff8e1"] * len(row)
+
+            st.dataframe(risk_display, use_container_width=True, height=420)
+            st.caption("Red rows = stock out within 2 months. Yellow = 3–6 months.")
+
+        # ── Per-item forecast chart ──
+        st.markdown("---")
+        st.markdown("#### 🔍 Per-Item 6-Month Forecast")
+        item_sel2 = st.selectbox(
+            "Select item:", df[df.TotalSales > 0]["ItemCode"].tolist(), key="fc_item"
+        )
+        if item_sel2:
+            irow2 = df[df.ItemCode == item_sel2].iloc[0]
+            _show_forecast_chart(irow2)
+
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 3 — PROCUREMENT BOARD
+    # ══════════════════════════════════════════════════════════════
+    with tab3:
+        _show_procurement_board(df)
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 4 — ANALYTICS
+    # ══════════════════════════════════════════════════════════════
+    with tab4:
+        st.markdown("#### 📊 Analytics Dashboard")
+
+        col_a, col_b = st.columns([3, 2])
+
+        with col_a:
+            # Annual trend chart
+            annual_df = pd.DataFrame([
+                {"Year": yr, "Type": "Inquiry",  "Quantity": summary["annual"][yr]["inq"]}
+                for yr in YEARS
+            ] + [
+                {"Year": yr, "Type": "Sales",    "Quantity": summary["annual"][yr]["sales"]}
+                for yr in YEARS
+            ] + [
+                {"Year": yr, "Type": "Purchase", "Quantity": summary["annual"][yr]["purch"]}
+                for yr in YEARS
+            ])
+            fig2 = px.bar(annual_df, x="Year", y="Quantity", color="Type", barmode="group",
+                          color_discrete_map={"Inquiry":"#007bff","Sales":"#28a745","Purchase":"#f0a500"},
+                          title="Annual Inquiry vs Sales vs Purchase (all items · lengths)")
+            fig2.update_layout(height=320, plot_bgcolor="#fafafa")
+            st.plotly_chart(fig2, use_container_width=True)
+
+            # Conversion rate trend
+            conv_df = pd.DataFrame([{
+                "Year": yr,
+                "Conversion %": round(
+                    summary["annual"][yr]["sales"] / (summary["annual"][yr]["inq"]+1) * 100, 2
+                )
+            } for yr in YEARS])
+            fig3 = px.line(conv_df, x="Year", y="Conversion %",
+                           title="Inquiry-to-Sales Conversion Rate (%)",
+                           markers=True, color_discrete_sequence=["#fd7e14"])
+            fig3.update_layout(height=260, plot_bgcolor="#fafafa")
+            st.plotly_chart(fig3, use_container_width=True)
+
+        with col_b:
+            # Signal pie
+            pie_data = pd.DataFrame({
+                "Signal": ["BUY","WATCH","HOLD","SKIP"],
+                "Count": [summary["buy"],summary["watch"],summary["hold"],summary["skip"]]
+            })
+            fig4 = px.pie(pie_data, values="Count", names="Signal",
+                          color="Signal",
+                          color_discrete_map={"BUY":"#28a745","WATCH":"#007bff","HOLD":"#ffc107","SKIP":"#dc3545"},
+                          title="Signal Distribution")
+            fig4.update_traces(textposition="inside", textinfo="percent+label")
+            fig4.update_layout(height=280, showlegend=False)
+            st.plotly_chart(fig4, use_container_width=True)
+
+            # Class breakdown
+            class_data = pd.DataFrame({
+                "Class": ["FAST MOVER","SLOW MOVER","PROJECT","DEAD"],
+                "Count": [summary["fast"],summary["slow"],summary["project"],summary["dead"]]
+            })
+            fig5 = px.bar(class_data, x="Count", y="Class", orientation="h",
+                          color="Class",
+                          color_discrete_map={"FAST MOVER":"#28a745","SLOW MOVER":"#007bff",
+                                              "PROJECT":"#fd7e14","DEAD":"#6c757d"},
+                          title="Item Classification")
+            fig5.update_layout(height=250, showlegend=False, plot_bgcolor="#fafafa",
+                               yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig5, use_container_width=True)
+
+        # Top items by proposed qty
+        st.markdown("#### 🏆 Top Items by Proposed Purchase Quantity")
+        top_df = df[df.ProposedQty_6M > 0].nlargest(15, "ProposedQty_6M")[
+            ["ItemCode","Signal","ItemClass","ProposedQty_6M","F6M_Mid",
+             "NetStock_Now","StockoutMonth","LeadTimeWeeks","PricePerLength","EstCostUSD"]
+        ].copy()
+        top_df.columns = ["Item Code","Signal","Class","Proposed Qty","6M Demand",
+                          "Net Stock","Stockout","Lead Wks","Price/Len","Est Cost USD"]
+        top_df["Est Cost USD"] = top_df["Est Cost USD"].apply(lambda x: f"${x:,.0f}" if x > 0 else "—")
+        top_df = top_df.round(1)
+
+        fig6 = px.bar(top_df.head(15), x="Proposed Qty", y="Item Code",
+                      orientation="h", color="Signal",
+                      color_discrete_map={"BUY":"#28a745","WATCH":"#007bff","HOLD":"#ffc107","SKIP":"#dc3545"},
+                      title="Top 15 Items — Proposed Purchase Quantity (lengths)")
+        fig6.update_layout(height=400, plot_bgcolor="#fafafa",
+                           yaxis=dict(autorange="reversed"), showlegend=True)
+        st.plotly_chart(fig6, use_container_width=True)
+        st.dataframe(top_df.set_index("Item Code"), use_container_width=True)
+
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 5 — BALANCE SHEET
+    # ══════════════════════════════════════════════════════════════
+    with tab5:
+        st.markdown("#### 📋 Year-wise Balance Sheet — Inquiry vs Sales vs Purchase")
+
+        balance_rows = []
+        for yr in YEARS:
+            inq   = summary["annual"][yr]["inq"]
+            sales = summary["annual"][yr]["sales"]
+            purch = summary["annual"][yr]["purch"]
+            conv  = round(sales/(inq+1)*100, 2) if inq > 0 else 0
+            balance_rows.append({
+                "Year": yr,
+                "Inquiries (lengths)": inq,
+                "Sales / Consumption (lengths)": sales,
+                "Purchases from Vendor (lengths)": purch,
+                "Conversion Rate %": conv,
+                "Net Position (Purch − Sales)": purch - sales,
+            })
+
+        bal_df = pd.DataFrame(balance_rows).set_index("Year")
+
+        def style_balance(val, col):
+            if col == "Net Position (Purch − Sales)":
+                return "color:#155724;font-weight:bold" if val >= 0 else "color:#cc0000;font-weight:bold"
+            return ""
+
+        st.dataframe(bal_df, use_container_width=True)
+
+        # Balance waterfall
+        fig7 = make_subplots(specs=[[{"secondary_y": True}]])
+        yrs_str = [str(y) for y in YEARS]
+        fig7.add_trace(go.Bar(name="Inquiries", x=yrs_str,
+                              y=[summary["annual"][y]["inq"]   for y in YEARS],
+                              marker_color="#007bff", opacity=0.7))
+        fig7.add_trace(go.Bar(name="Sales",     x=yrs_str,
+                              y=[summary["annual"][y]["sales"] for y in YEARS],
+                              marker_color="#28a745", opacity=0.9))
+        fig7.add_trace(go.Bar(name="Purchase",  x=yrs_str,
+                              y=[summary["annual"][y]["purch"] for y in YEARS],
+                              marker_color="#f0a500", opacity=0.9))
+        fig7.add_trace(go.Scatter(
+            name="Conv Rate %", x=yrs_str,
+            y=[round(summary["annual"][y]["sales"]/(summary["annual"][y]["inq"]+1)*100,2) for y in YEARS],
+            mode="lines+markers", line=dict(color="#dc3545",width=2),
+            marker=dict(size=8)
+        ), secondary_y=True)
+        fig7.update_layout(barmode="group", height=380, plot_bgcolor="#fafafa",
+                           title="6-Year History — Inquiry / Sales / Purchase + Conversion Rate")
+        fig7.update_yaxes(title_text="Lengths",       secondary_y=False)
+        fig7.update_yaxes(title_text="Conv Rate (%)", secondary_y=True)
+        st.plotly_chart(fig7, use_container_width=True)
+
+        # Stock position table
+        st.markdown("#### 📦 Current Stock Position")
+        stock_df = df[["ItemCode","QOH","OpenSO","AvailStock","IncomingPO",
+                        "NetAvailStock","ItemClass","Signal","StockCoverDays"]].copy()
+        stock_df = stock_df[stock_df.QOH > 0].sort_values("QOH", ascending=False)
+        stock_df.columns = ["Item","QOH","Open SO","Avail Stock","Incoming PO",
+                             "Net Avail","Class","Signal","Cover Days"]
+        st.dataframe(stock_df.set_index("Item"), use_container_width=True, height=400)
+
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 6 — LEARNING DASHBOARD
+    # ══════════════════════════════════════════════════════════════
+    with tab6:
+        _show_learning_dashboard(df)
+
+    # ══════════════════════════════════════════════════════════════
+    # TAB 7 — ALGORITHM EXPLAINED
+    # ══════════════════════════════════════════════════════════════
+    with tab7:
+        st.markdown("#### ⚙️ How the Algorithm Works")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("""
+            <div style="background:#f8f9fa;border-radius:10px;padding:20px;border-left:4px solid #1A1A2E">
+            <h4 style="color:#1A1A2E;margin-top:0">🧮 WMSPS — Procurement Scoring</h4>
+            <p style="color:#555;font-size:13px">
+            <b>Weighted Multi-Signal Procurement Scoring</b> gives each item a
+            0–100 score from 4 independent signals, then derives a buy/watch/hold/skip decision.
+            </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            for title, pct, desc, color, detail in [
+                ("🔵 S1 — Sales Velocity", "35%",
+                 "Is demand growing or dying?",
+                 "#007bff",
+                 "Weighted least-squares regression across 6 years. Years 2025–2026 carry 2×–3× more weight than 2021. A positive slope = growing sales = high score. Items with zero recent sales score near 0."),
+                ("🟣 S2 — Inquiry Conversion", "25%",
+                 "Do inquiries turn into orders?",
+                 "#6f42c1",
+                 "Conversion Rate = Total Sales ÷ Total Inquiries. High recent inquiry volume adds a boost. This catches items where demand is building but not yet converted (project pipeline)."),
+                ("🟠 S3 — Stock Coverage", "25%",
+                 "How many months of stock remain vs lead time?",
+                 "#fd7e14",
+                 "Coverage = NET Stock ÷ Avg Monthly Sales. Lead-time aware: if stock covers less than lead time → score 95–100 (will stockout before PO arrives). Zero stock = score 100 (critical)."),
+                ("🔴 S4 — Open SO Pressure", "15%",
+                 "Are booked customer orders at risk?",
+                 "#dc3545",
+                 "% of Open Sales Orders uncovered by Available Stock. If Open SO > Stock → customer commitments are at risk → forces BUY signal regardless of score."),
+            ]:
+                with st.expander(f"{title} — Weight: {pct}  ·  {desc}"):
+                    st.markdown(f"""
+                    <div style="border-left:3px solid {color};padding:8px 12px;font-size:13px;color:#444">
+                    {detail}
+                    </div>""", unsafe_allow_html=True)
+
+            st.markdown("""
+            <div style="background:#1A1A2E;color:#fff;padding:12px 16px;border-radius:6px;font-family:monospace;font-size:13px;margin-top:12px">
+            Score = S1×0.35 + S2×0.25 + S3×0.25 + S4×0.15<br><br>
+            🟢 BUY   → Score ≥ 60  (or Open SO > Available Stock)<br>
+            🔵 WATCH → Score 40–59<br>
+            🟡 HOLD  → Score 20–39<br>
+            ⛔ SKIP  → Score &lt; 20 or DEAD item
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col2:
+            st.markdown("""
+            <div style="background:#f8f9fa;border-radius:10px;padding:20px;border-left:4px solid #007bff">
+            <h4 style="color:#1A1A2E;margin-top:0">📅 TWMAP — 6-Month Forecast</h4>
+            <p style="color:#555;font-size:13px">
+            <b>Trend-Weighted Moving Average Projection</b> computes month-by-month
+            demand for the next 6 months using 3 multiplied signals.
+            </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            for step, title, color, detail in [
+                ("1","Base Monthly Rate","#2D3561",
+                 "Weighted average annual sales ÷ 12. Only years with actual sales are included (zeros excluded from average). Recent years weighted 2×–3× more. 2026 data is annualised from partial-year actuals."),
+                ("2","YoY Trend Multiplier","#007bff",
+                 "Compares recent 2-year sales (2025+2026) vs prior 2-year (2023+2024). If demand doubled → multiplier = 2.0×. If demand halved → 0.5×. Capped at 0.5×–2.0× to prevent extreme projections."),
+                ("3","Inquiry Momentum Boost","#6f42c1",
+                 "Recent inquiry volume vs 6-year average. High recent inquiry = demand pipeline building = boost up to 1.5×. Low recent inquiry = pullback = down to 0.8×."),
+                ("4","Monthly Decay Factor","#fd7e14",
+                 "Months further in the future are less certain. Decay: 1.00, 0.98, 0.96, 0.94, 0.92, 0.90. Low band = Mid × 0.75. High band = Mid × 1.30."),
+            ]:
+                with st.expander(f"Step {step}: {title}"):
+                    st.markdown(f"""
+                    <div style="border-left:3px solid {color};padding:8px 12px;font-size:13px;color:#444">
+                    {detail}
+                    </div>""", unsafe_allow_html=True)
+
+            st.markdown("""
+            <div style="background:#1A1A2E;color:#fff;padding:12px 16px;border-radius:6px;font-family:monospace;font-size:13px;margin-top:12px">
+            Monthly[i] = Base × Trend × InqBoost × Decay[i]<br>
+            Low  = Mid × 0.75 &nbsp;|&nbsp; High = Mid × 1.30<br><br>
+            NET Stock = QOH + Incoming PO − Open SO<br>
+            BuyNow = max(0, 6M Total + Safety − NET Stock)<br>
+            Safety Buffer = 1 month of base forecast<br><br>
+            Confidence: HIGH = sales 4+ yrs · MED = 2-3 yrs · LOW = 1 yr
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("##### 📦 Item Classification Rules")
+            class_rules = pd.DataFrame([
+                ["FAST MOVER",  "Sales in 3+ of the 6 years", "Standard 6M cover + 2mo safety"],
+                ["SLOW MOVER",  "Sales in 1–2 years only",    "6M cover + 1mo safety"],
+                ["PROJECT",     "1 big spike year, quiet rest","6M cover + 1mo (manual review)"],
+                ["DEAD",        "Zero sales, <3 total inquiries","Never buy — score forced to 0"],
+            ], columns=["Class","Trigger","Buy Logic"])
+            st.dataframe(class_rules.set_index("Class"), use_container_width=True)
+
+
+# ─────────────────────────────────────────────────────────────────
+# HELPER: Item detail panel
+# ─────────────────────────────────────────────────────────────────
