@@ -950,10 +950,6 @@ def _show_forecast_chart(row):
     with c4: st.metric("Stockout Risk",     str(row.StockoutMonth) if row.HasStockoutRisk else "✅ None")
 
 
-if __name__ == "__main__":
-    main()
-
-
 # ─────────────────────────────────────────────────────────────────
 # LEARNING DASHBOARD
 # ─────────────────────────────────────────────────────────────────
