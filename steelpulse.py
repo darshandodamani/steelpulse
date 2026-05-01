@@ -1477,55 +1477,250 @@ def _show_procurement_board(df):
     want = ['ItemCode','ABC_XYZ','Final_Action','DM_Action',
             'Q_Label','PO_Label','Stock_Label',
             'Inq_12M','Conv_12M','Sales_12M',
-            'TotalValue','NetAvailStock','ProposedQty_6M',
+            'QOH','OpenSO','IncomingPO','NetAvailStock',
+            'StockCoverDays','ProposedQty_6M',
             'F6M_Mid','StockoutMonth','CoV','Final_Reason']
     avail = [c for c in want if c in show_df.columns]
     disp  = show_df[avail].copy()
     rename = {
-        'ItemCode':'Item Code','ABC_XYZ':'Class','Final_Action':'Decision',
-        'DM_Action':'Mkt Signal','Q_Label':'Quotation','PO_Label':'PO Recv.',
-        'Stock_Label':'Stock','Inq_12M':'Inq 12M','Conv_12M':'Conv %',
-        'Sales_12M':'Sales 12M','TotalValue':'Total Value ($)',
-        'NetAvailStock':'Net Stock','ProposedQty_6M':'Proposed Buy',
-        'F6M_Mid':'6M Demand','StockoutMonth':'Stockout','CoV':'CoV',
-        'Final_Reason':'Reason'
+        'ItemCode':      'Item Code',
+        'ABC_XYZ':       'Class',
+        'Final_Action':  'Decision',
+        'DM_Action':     'Mkt Signal',
+        'Q_Label':       'Quotation',
+        'PO_Label':      'PO Recv.',
+        'Stock_Label':   'Stock Signal',
+        'Inq_12M':       'Inq 12M',
+        'Conv_12M':      'Conv %',
+        'Sales_12M':     'Sales 12M',
+        'QOH':           'QOH (On Hand)',
+        'OpenSO':        'Open SO',
+        'IncomingPO':    'Incoming PO',
+        'NetAvailStock': 'Net Stock',
+        'StockCoverDays':'Cover Days',
+        'ProposedQty_6M':'Proposed Buy',
+        'F6M_Mid':       '6M Demand',
+        'StockoutMonth': 'Stockout',
+        'CoV':           'CoV',
+        'Final_Reason':  'Reason',
     }
     disp = disp.rename(columns={k:v for k,v in rename.items() if k in disp.columns})
-    if 'Conv %'    in disp: disp['Conv %']         = (disp['Conv %']*100).round(1).astype(str)+'%'
-    if 'Inq 12M'  in disp: disp['Inq 12M']        = disp['Inq 12M'].round(0).astype(int)
-    if 'Sales 12M'in disp: disp['Sales 12M']       = disp['Sales 12M'].round(0).astype(int)
-    if 'Net Stock' in disp: disp['Net Stock']      = disp['Net Stock'].round(0).astype(int)
-    if 'Proposed Buy' in disp: disp['Proposed Buy']= disp['Proposed Buy'].round(0).astype(int)
-    if 'Total Value ($)' in disp: disp['Total Value ($)'] = disp['Total Value ($)'].apply(lambda x: f"${x:,.0f}")
-    if 'CoV' in disp: disp['CoV'] = disp['CoV'].round(2)
+    if 'Conv %'       in disp: disp['Conv %']        = (disp['Conv %']*100).round(1).astype(str)+'%'
+    if 'Inq 12M'      in disp: disp['Inq 12M']       = disp['Inq 12M'].round(0).astype(int)
+    if 'Sales 12M'    in disp: disp['Sales 12M']      = disp['Sales 12M'].round(0).astype(int)
+    if 'QOH (On Hand)'in disp: disp['QOH (On Hand)'] = disp['QOH (On Hand)'].round(0).astype(int)
+    if 'Open SO'      in disp: disp['Open SO']        = disp['Open SO'].round(0).astype(int)
+    if 'Incoming PO'  in disp: disp['Incoming PO']    = disp['Incoming PO'].round(0).astype(int)
+    if 'Net Stock'    in disp: disp['Net Stock']      = disp['Net Stock'].round(0).astype(int)
+    if 'Cover Days'   in disp: disp['Cover Days']     = disp['Cover Days'].round(0).astype(int)
+    if 'Proposed Buy' in disp: disp['Proposed Buy']   = disp['Proposed Buy'].round(0).astype(int)
+    if '6M Demand'    in disp: disp['6M Demand']      = disp['6M Demand'].round(1)
+    if 'CoV'          in disp: disp['CoV']            = disp['CoV'].round(2)
 
     ACTION_COLORS = {
-        'BUY (PRIORITY)':     '#d4edda',
-        'BUY':                '#d4edda',
-        'MONITOR / BUY':      '#cce5ff',
-        'BUY (CONTROLLED)':   '#fff3cd',
-        'REVIEW / BUY':       '#fff3cd',
-        'MONITOR':            '#cce5ff',
-        'REVIEW CLOSELY':     '#ede7f6',
-        'REVIEW':             '#ede7f6',
-        'REVIEW OCCASIONALLY':'#f0f0f0',
-        'LIMIT BUY':          '#ffe8d0',
-        'HOLD / MINIMAL':     '#fff3cd',
+        'BUY (PRIORITY)':      '#d4edda',
+        'BUY':                 '#d4edda',
+        'MONITOR / BUY':       '#cce5ff',
+        'BUY (CONTROLLED)':    '#fff3cd',
+        'BUY (WATCH)':         '#cce5ff',
+        'REVIEW / BUY':        '#fff3cd',
+        'MONITOR':             '#cce5ff',
+        'REVIEW CLOSELY':      '#ede7f6',
+        'REVIEW':              '#ede7f6',
+        'REVIEW OCCASIONALLY': '#f0f0f0',
+        'LIMIT BUY':           '#ffe8d0',
+        'HOLD / MINIMAL':      '#fff3cd',
     }
 
     def _color_row(row):
-        action = row.get('Decision','')
+        action = row.get('Decision', '')
         bg = ACTION_COLORS.get(action, '')
+        # Extra: highlight red if Net Stock = 0
+        if 'Net Stock' in row and row['Net Stock'] == 0:
+            return ['background-color:#ffe5e5'] * len(row)
         return [f'background-color:{bg}'] * len(row) if bg else [''] * len(row)
 
     st.dataframe(
         disp.set_index('Item Code').style.apply(_color_row, axis=1),
-        use_container_width=True, height=460
+        use_container_width=True, height=480
     )
     st.caption(
-        f"Showing {len(show_df)} items · "
-        f"🔥 Priority BUY = AX class · Colors: green=buy · blue=monitor · purple=review · orange=limited"
+        f"Showing {len(show_df)} items  |  "
+        f"🟢 Green=BUY  🔵 Blue=Monitor  🟣 Purple=Review  🟠 Orange=Limit  🔴 Red=Zero stock  |  "
+        f"Net Stock = QOH + Incoming PO - Open SO"
     )
+
+    # ── STOCK POSITION CHART ──
+    st.markdown("---")
+    st.markdown("#### 📊 Stock Position — All Items in Current View")
+    st.caption("QOH = Physical stock on hand · Open SO = Reserved for customers · Incoming PO = On order from vendor · Net = What is truly available")
+
+    chart_df = show_df[['ItemCode','QOH','OpenSO','IncomingPO','NetAvailStock','F6M_Mid','ProposedQty_6M']].copy()
+    chart_df = chart_df.sort_values('NetAvailStock', ascending=True)
+    chart_df['ItemCode'] = chart_df['ItemCode'].astype(str)
+
+    # Limit to top 30 for readability
+    if len(chart_df) > 30:
+        # Show the most critical: sort by coverage = NetStock / F6M_Mid
+        chart_df['CoverageRatio'] = chart_df['NetAvailStock'] / (chart_df['F6M_Mid'] + 1e-9)
+        chart_df = chart_df.nsmallest(30, 'CoverageRatio')
+        chart_df = chart_df.sort_values('NetAvailStock', ascending=True)
+        st.caption("Showing 30 most critical items by stock coverage ratio")
+
+    # Stacked bar: QOH (green) + IncomingPO (blue) vs OpenSO (red) vs 6M Demand (orange line)
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        name='QOH (On Hand)',
+        x=chart_df['ItemCode'],
+        y=chart_df['QOH'].round(0),
+        marker_color='#28a745',
+        opacity=0.85,
+        text=chart_df['QOH'].round(0).astype(int),
+        textposition='inside',
+        textfont=dict(size=9, color='white'),
+    ))
+
+    fig.add_trace(go.Bar(
+        name='Incoming PO',
+        x=chart_df['ItemCode'],
+        y=chart_df['IncomingPO'].round(0),
+        marker_color='#007bff',
+        opacity=0.85,
+        text=chart_df['IncomingPO'].apply(lambda x: str(int(x)) if x > 0 else ''),
+        textposition='inside',
+        textfont=dict(size=9, color='white'),
+    ))
+
+    fig.add_trace(go.Bar(
+        name='Open SO (Reserved)',
+        x=chart_df['ItemCode'],
+        y=(-chart_df['OpenSO']).round(0),
+        marker_color='#dc3545',
+        opacity=0.8,
+        text=chart_df['OpenSO'].apply(lambda x: f'-{int(x)}' if x > 0 else ''),
+        textposition='inside',
+        textfont=dict(size=9, color='white'),
+    ))
+
+    fig.add_trace(go.Scatter(
+        name='6M Demand (forecast)',
+        x=chart_df['ItemCode'],
+        y=chart_df['F6M_Mid'].round(1),
+        mode='markers+lines',
+        marker=dict(color='#f0a500', size=8, symbol='diamond'),
+        line=dict(color='#f0a500', width=2, dash='dot'),
+        yaxis='y',
+    ))
+
+    fig.add_trace(go.Scatter(
+        name='Proposed Buy',
+        x=chart_df['ItemCode'],
+        y=chart_df['ProposedQty_6M'].round(0),
+        mode='markers',
+        marker=dict(color='#1A1A2E', size=10, symbol='triangle-up'),
+    ))
+
+    fig.add_hline(y=0, line_color='#333', line_width=1)
+
+    fig.update_layout(
+        barmode='relative',
+        height=420,
+        plot_bgcolor='#fafafa',
+        paper_bgcolor='#fff',
+        xaxis=dict(tickangle=-45, tickfont=dict(size=9)),
+        yaxis=dict(title='Lengths', zeroline=True, zerolinecolor='#333'),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, x=0),
+        margin=dict(b=100, t=40, l=60, r=20),
+        hovermode='x unified',
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Net Stock vs 6M Demand scatter ──
+    st.markdown("#### 🎯 Net Stock vs 6-Month Demand — Risk View")
+    st.caption("Items below the diagonal line have LESS stock than 6M demand — they need to buy")
+
+    scatter_df = show_df[['ItemCode','NetAvailStock','F6M_Mid','Final_Action','ABC_XYZ','ProposedQty_6M']].copy()
+    scatter_df = scatter_df[scatter_df['F6M_Mid'] > 0].copy()
+
+    color_map = {
+        'BUY (PRIORITY)':      '#155724',
+        'BUY':                 '#28a745',
+        'BUY (CONTROLLED)':    '#fd7e14',
+        'BUY (WATCH)':         '#007bff',
+        'MONITOR / BUY':       '#007bff',
+        'LIMIT BUY':           '#fd7e14',
+        'REVIEW CLOSELY':      '#6f42c1',
+        'HOLD / MINIMAL':      '#856404',
+        'REVIEW OCCASIONALLY': '#888888',
+    }
+    scatter_df['Color'] = scatter_df['Final_Action'].map(lambda x: color_map.get(x, '#888'))
+
+    fig2 = go.Figure()
+
+    # Diagonal = break-even line (stock = 6M demand)
+    max_val = max(scatter_df['NetAvailStock'].max(), scatter_df['F6M_Mid'].max()) * 1.1
+    fig2.add_trace(go.Scatter(
+        x=[0, max_val], y=[0, max_val],
+        mode='lines',
+        line=dict(color='#ccc', dash='dash', width=1),
+        name='Break-even (stock = demand)',
+        showlegend=True,
+    ))
+
+    # Plot each item
+    for action, grp in scatter_df.groupby('Final_Action'):
+        color = color_map.get(action, '#888')
+        fig2.add_trace(go.Scatter(
+            x=grp['NetAvailStock'],
+            y=grp['F6M_Mid'],
+            mode='markers+text',
+            name=action,
+            text=grp['ItemCode'],
+            textposition='top center',
+            textfont=dict(size=8),
+            marker=dict(color=color, size=10, opacity=0.85,
+                        line=dict(color='white', width=1)),
+            customdata=grp[['ABC_XYZ','ProposedQty_6M']].values,
+            hovertemplate=(
+                '<b>%{text}</b><br>'
+                'Net Stock: %{x:.0f}<br>'
+                '6M Demand: %{y:.1f}<br>'
+                'Class: %{customdata[0]}<br>'
+                'Proposed Buy: %{customdata[1]:.0f}<br>'
+                '<extra></extra>'
+            ),
+        ))
+
+    # Shade danger zone (below diagonal = need to buy)
+    fig2.add_annotation(
+        x=max_val*0.15, y=max_val*0.75,
+        text='⬅ NEED TO BUY<br>(stock < demand)',
+        showarrow=False,
+        font=dict(color='#cc0000', size=11),
+        bgcolor='rgba(255,229,229,0.8)',
+        bordercolor='#cc0000',
+        borderwidth=1,
+    )
+    fig2.add_annotation(
+        x=max_val*0.75, y=max_val*0.15,
+        text='WELL STOCKED ➡<br>(stock > demand)',
+        showarrow=False,
+        font=dict(color='#155724', size=11),
+        bgcolor='rgba(212,237,218,0.8)',
+        bordercolor='#28a745',
+        borderwidth=1,
+    )
+
+    fig2.update_layout(
+        height=480,
+        plot_bgcolor='#fafafa',
+        xaxis=dict(title='Net Available Stock (lengths)', zeroline=True),
+        yaxis=dict(title='6-Month Forecast Demand (lengths)', zeroline=True),
+        legend=dict(orientation='h', yanchor='bottom', y=-0.35),
+        margin=dict(b=120),
+    )
+    st.plotly_chart(fig2, use_container_width=True)
 
     # ── Item detail ──
     st.markdown("---")
