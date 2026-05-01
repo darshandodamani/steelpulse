@@ -8,7 +8,7 @@
 ╚══════════════════════════════════════════════════════════════════╝
 
 HOW TO RUN:
-    pip install streamlit pandas numpy openpyxl plotly scipy scikit-learn xlsxwriter
+    pip install streamlit pandas numpy openpyxl plotly xlsxwriter
     streamlit run steelpulse.py
 
 HOW TO USE:
@@ -811,8 +811,13 @@ def main():
 
     # ── Run analysis ──
     with st.spinner("⚙️ Running WMSPS algorithm + TWMAP 6-month forecast..."):
-        file_bytes = uploaded.read()
-        df = run_full_analysis(file_bytes, uploaded.name)
+        try:
+            file_bytes = uploaded.read()
+            df = run_full_analysis(file_bytes, uploaded.name)
+        except Exception as e:
+            st.error(f"❌ Error processing file: {str(e)}")
+            st.info("💡 Make sure your file contains: Quotation-Table, SO-Table/TSO Table, Purchase-Table/TP History, Tubing Stock balance, and 144 PRICE sheets.")
+            st.stop()
 
     summary = compute_summary(df)
 
@@ -918,8 +923,8 @@ def main():
                 return ["background-color:#fff5f5;color:#cc0000"] * len(row)
             return [""] * len(row)
 
-        styled = tbl.sort_values("Score", ascending=False).style.apply(highlight_row, axis=1)
-        st.dataframe(styled, use_container_width=True, height=520)
+        sorted_tbl = tbl.sort_values("Score", ascending=False)
+        st.dataframe(sorted_tbl, use_container_width=True, height=520)
 
         st.caption(f"Showing {len(filtered):,} items · Green = BUY · Blue = WATCH · Red background = Stockout risk · Click column header to sort")
 
@@ -994,10 +999,7 @@ def main():
                     return ["background-color:#ffe5e5;font-weight:bold"] * len(row)
                 return ["background-color:#fff8e1"] * len(row)
 
-            st.dataframe(
-                risk_display.style.apply(highlight_risk, axis=1),
-                use_container_width=True, height=420
-            )
+            st.dataframe(risk_display, use_container_width=True, height=420)
             st.caption("Red rows = stock out within 2 months. Yellow = 3–6 months.")
 
         # ── Per-item forecast chart ──
@@ -1127,18 +1129,7 @@ def main():
                 return "color:#155724;font-weight:bold" if val >= 0 else "color:#cc0000;font-weight:bold"
             return ""
 
-        st.dataframe(
-            bal_df.style.apply(
-                lambda col: [style_balance(v, col.name) for v in col], axis=0
-            ).format({
-                "Inquiries (lengths)": "{:,.0f}",
-                "Sales / Consumption (lengths)": "{:,.0f}",
-                "Purchases from Vendor (lengths)": "{:,.0f}",
-                "Conversion Rate %": "{:.2f}%",
-                "Net Position (Purch − Sales)": "{:+,.0f}",
-            }),
-            use_container_width=True
-        )
+        st.dataframe(bal_df, use_container_width=True)
 
         # Balance waterfall
         fig7 = make_subplots(specs=[[{"secondary_y": True}]])
