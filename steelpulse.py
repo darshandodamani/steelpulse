@@ -2315,7 +2315,7 @@ def main():
 
     # ── Header ──
     st.markdown("""
-    <div style="background:#1A1A2E;padding:26px 24px;border-radius:6px;margin-bottom:16px;">
+    <div style="background:#1A1A2E;padding:32px 24px;border-radius:6px;margin-bottom:16px;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
             <div style="font-size:24px;font-weight:800;color:#fff;">Tubing <span style="color:#f0a500;">Sales Visualizer</span></div>
             <div style="font-size:12px;color:#aaa;text-align:center;flex:grow;">Inquiry-to-Sales Analytics Platform</div>
