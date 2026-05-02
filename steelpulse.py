@@ -2315,10 +2315,12 @@ def main():
 
     # ── Header ──
     st.markdown("""
-    <div style="background:#1A1A2E;padding:16px 24px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
-      <span style="font-size:28px;font-weight:800;color:#fff">� Tubing<span style="color:#f0a500"> Sales Visualizer</span></span>
-      <span style="color:#555;font-size:13px">| Inquiry-to-Sales Analytics Platform</span>
-      <span style="margin-left:auto;color:#888;font-size:11px">WMSPS Algorithm + TWMAP 6-Month Forecast</span>
+    <div style="background:#1A1A2E;padding:26px 24px;border-radius:6px;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
+            <div style="font-size:24px;font-weight:800;color:#fff;">Tubing <span style="color:#f0a500;">Sales Visualizer</span></div>
+            <div style="font-size:12px;color:#aaa;text-align:center;flex:grow;">Inquiry-to-Sales Analytics Platform</div>
+            <div style="font-size:10px;color:#888;white-space:nowrap;">WMSPS Algorithm + TWMAP Forecast</div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
