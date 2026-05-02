@@ -2678,11 +2678,10 @@ def main():
             st.dataframe(class_rules.set_index("Class"), use_container_width=True)
 
 
-
-
 # ─────────────────────────────────────────────────────────────────
 # HELPER: Item detail panel
 # ─────────────────────────────────────────────────────────────────
+
 
 if __name__ == "__main__":
     main()
