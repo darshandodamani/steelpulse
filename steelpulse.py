@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║          SteelPulse — Procurement Intelligence Platform          ║
+║          Tubing Supply Chain Visualizer — Procurement Intelligence Platform          ║
 ║          Streamlit Single-File App  |  Version 2.0               ║
 ║                                                                  ║
 ║  ALGORITHM: Weighted Multi-Signal Procurement Scoring (WMSPS)   ║
@@ -9,7 +9,7 @@
 
 HOW TO RUN:
     pip install streamlit pandas numpy openpyxl plotly xlsxwriter
-    streamlit run steelpulse.py
+    streamlit run Tubing Supply Chain Visualizer.py
 
 HOW TO USE:
     1. Upload your SAP Excel export (.xlsx) in the sidebar
@@ -944,7 +944,7 @@ def build_excel_export(df):
 
         # ── Sheet 1: Executive Summary ──
         ws = wb.add_worksheet("Executive Summary")
-        ws.write(0, 0, "🔩 SteelPulse — Procurement Intelligence Report", title_fmt)
+        ws.write(0, 0, "🔩 Tubing Supply Chain Visualizer — Procurement Intelligence Report", title_fmt)
         ws.write(1, 0, f"Generated: {datetime.now().strftime('%d %B %Y %H:%M')}")
         summary = compute_summary(df)
         kpi_data = [
@@ -2106,7 +2106,7 @@ def _show_board_item_detail(row, YEARS):
 def main():
     init_db()   # ensure SQLite tables exist
     st.set_page_config(
-        page_title="SteelPulse — Procurement Intelligence",
+        page_title="Tubing Supply Chain Visualizer — Procurement Intelligence",
         page_icon="🔩",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -2233,7 +2233,7 @@ def main():
         st.download_button(
             label="⬇️ Export Excel Report",
             data=excel_buf,
-            file_name=f"SteelPulse_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            file_name=f"Tubing Supply Chain Visualizer_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
         )
