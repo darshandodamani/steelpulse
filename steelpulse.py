@@ -81,61 +81,126 @@ MONTH_LABELS = _next_6_months()
 # STEP 1 — EXCEL PARSER
 # ─────────────────────────────────────────────────────────────────
 def parse_excel(uploaded_file):
-    """Parse all relevant sheets from uploaded SAP Excel export."""
-    xl = pd.ExcelFile(uploaded_file)
-    sheets = xl.sheet_names
-    data = {}
+    """
+    Parse SAP Excel export using ONLY raw data sheets.
+    Sheets used:
+      - Tubing Quotation    → inquiry data by item/date
+      - Tubing Sales Order  → sales + fill rate data by item/date
+      - Tubing Purchase     → purchase data by item/date
+      - Tubing Stock balance → current stock position per item
+    Sheets NOT used: Sheet5 (manual), TP History (pivot), Purchase-Table (pivot),
+      Quotation-Table (pivot), SO-Table (pivot), 144 PRICE, Date
+    """
+    import warnings
+    warnings.filterwarnings("ignore")
 
-    # ── Quotation pivot ──
-    for sh in sheets:
-        raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
-        flat = " ".join(str(x) for x in raw.values.flatten())
-        if "Tubing Quotation Table" in flat or (
-            "Sum of Quantity" in flat and "Row Labels" in flat and "2021" in flat
-        ):
-            pv = _parse_pivot(raw)
-            if pv is not None and len(pv) > 5:
-                data["quotation_pivot"] = pv
-                break
+    xl       = pd.ExcelFile(uploaded_file)
+    sheets   = xl.sheet_names
+    data     = {}
+    YEARS    = [2021, 2022, 2023, 2024, 2025, 2026]
+    M26      = 4   # months of 2026 available
 
-    # ── SO pivot ──
-    for sh in sheets:
-        if sh in ("SO-Table", "TSO Table", "Sheet2"):
-            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
-            pv = _parse_pivot(raw)
-            if pv is not None and len(pv) > 2:
-                data["so_pivot"] = pv
-                break
+    RAW_SHEETS = {
+        'quotation':  ['Tubing Quotation'],
+        'sales':      ['Tubing Sales Order'],
+        'purchase':   ['Tubing Purchase'],
+        'stock':      ['Tubing Stock balance'],
+    }
 
-    # ── Purchase pivot ──
-    for sh in sheets:
-        if sh in ("Purchase-Table", "TP History", "Sheet1"):
-            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
-            pv = _parse_pivot(raw)
-            if pv is not None and len(pv) > 2:
-                data["purchase_pivot"] = pv
-                break
-
-    # ── Stock balance ──
-    for sh in sheets:
-        raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
-        flat = " ".join(str(x) for x in raw.values.flatten())
-        if "01-QOH" in flat and "ItemCode" in flat:
-            data["stock"] = _parse_stock(raw)
+    # ── 1. TUBING QUOTATION ──
+    for sh in RAW_SHEETS['quotation']:
+        if sh in sheets:
+            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=3)
+            raw.columns = raw.columns.str.strip()
+            raw = raw.dropna(subset=['ItemCode'])
+            raw['ItemCode'] = raw['ItemCode'].astype(str).str.strip()
+            raw['Quote Date'] = pd.to_datetime(raw['Quote Date'], errors='coerce')
+            raw['Year'] = raw['Quote Date'].dt.year
+            raw['Quantity'] = pd.to_numeric(raw['Quantity'], errors='coerce').fillna(0)
+            # Pivot by year
+            pv = raw[raw['Year'].isin(YEARS)].groupby(['ItemCode','Year'])['Quantity'].sum().unstack(fill_value=0)
+            pv.columns = [int(c) for c in pv.columns]
+            for y in YEARS:
+                if y not in pv.columns: pv[y] = 0
+            data['quotation_raw'] = pv
             break
 
-    # ── Pricing ──
-    for sh in sheets:
-        if "PRICE" in sh.upper() or "144" in sh:
-            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
-            data["pricing"] = _parse_pricing(raw)
+    # ── 2. TUBING SALES ORDER ──
+    for sh in RAW_SHEETS['sales']:
+        if sh in sheets:
+            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=3)
+            raw.columns = raw.columns.str.strip()
+            raw = raw.dropna(subset=['ItemCode'])
+            raw['ItemCode'] = raw['ItemCode'].astype(str).str.strip()
+            raw['Order Date'] = pd.to_datetime(raw['Order Date'], errors='coerce')
+            raw['Year'] = raw['Order Date'].dt.year
+            raw['Quantity'] = pd.to_numeric(raw['Quantity'], errors='coerce').fillna(0)
+            raw['Delivered Qty'] = pd.to_numeric(raw['Delivered Qty'], errors='coerce').fillna(0)
+            # Sales = all lines (O=open, C=closed)
+            pv = raw[raw['Year'].isin(YEARS)].groupby(['ItemCode','Year'])['Quantity'].sum().unstack(fill_value=0)
+            pv.columns = [int(c) for c in pv.columns]
+            for y in YEARS:
+                if y not in pv.columns: pv[y] = 0
+            data['sales_raw'] = pv
+            # Fill rate: per item (closed lines = delivered/ordered)
+            closed = raw[raw['Line Status'] == 'C']
+            fr = closed.groupby('ItemCode').agg(
+                ordered=('Quantity','sum'),
+                delivered=('Delivered Qty','sum')
+            )
+            fr['fill_rate'] = (fr['delivered'] / (fr['ordered'] + 1e-9)).clip(0, 1)
+            data['fill_rate'] = fr[['fill_rate']]
+            # Open SO (current outstanding orders)
+            open_so = raw[raw['Line Status'] == 'O'].groupby('ItemCode')['Quantity'].sum()
+            data['open_so'] = open_so
             break
 
-    # ── Master Sheet5 ──
-    for sh in sheets:
-        if sh == "Sheet5":
-            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=None)
-            data["master_sheet"] = _parse_sheet5(raw)
+    # ── 3. TUBING PURCHASE (raw sheet, DocDate year) ──
+    for sh in RAW_SHEETS['purchase']:
+        if sh in sheets:
+            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=3)
+            raw.columns = raw.columns.str.strip()
+            raw = raw.dropna(subset=['ItemCode'])
+            raw['ItemCode'] = raw['ItemCode'].astype(str).str.strip()
+            raw['DocDate'] = pd.to_datetime(raw['DocDate'], errors='coerce')
+            raw['ShipDate'] = pd.to_datetime(raw['ShipDate'], errors='coerce')
+            raw['Year'] = raw['DocDate'].dt.year
+            raw['Quantity'] = pd.to_numeric(raw['Quantity'], errors='coerce').fillna(0)
+            raw['OpenQty'] = pd.to_numeric(raw['OpenQty'], errors='coerce').fillna(0)
+            # Historical purchases (closed lines)
+            closed_purch = raw[raw['LineStatus'] == 'C']
+            pv = closed_purch[closed_purch['Year'].isin(YEARS)].groupby(['ItemCode','Year'])['Quantity'].sum().unstack(fill_value=0)
+            pv.columns = [int(c) for c in pv.columns]
+            for y in YEARS:
+                if y not in pv.columns: pv[y] = 0
+            data['purchase_raw'] = pv
+            # Incoming PO (open lines not yet received)
+            open_po = raw[raw['LineStatus'] == 'O'].groupby('ItemCode')['OpenQty'].sum()
+            data['incoming_po_raw'] = open_po
+            break
+
+    # ── 4. TUBING STOCK BALANCE ──
+    for sh in RAW_SHEETS['stock']:
+        if sh in sheets:
+            raw = pd.read_excel(uploaded_file, sheet_name=sh, header=3)
+            raw.columns = [str(c).strip() for c in raw.columns]
+            raw = raw.dropna(subset=['ItemCode'])
+            raw['ItemCode'] = raw['ItemCode'].astype(str).str.strip()
+
+            def _num(col):
+                if col in raw.columns:
+                    return pd.to_numeric(raw[col], errors='coerce').fillna(0)
+                return 0
+
+            stock = pd.DataFrame({'ItemCode': raw['ItemCode']})
+            stock['QOH']           = _num('01-QOH')
+            stock['OpenSO']        = _num('01-Open SO')
+            stock['AvailStock']    = _num('01-Avail Stock')
+            stock['IncomingPO']    = _num('01 PO')
+            stock['NetAvailStock'] = _num('01-Net Avail Stock')
+            stock['ItemCost']      = _num('Item Cost')
+            stock = stock.set_index('ItemCode')
+            data['stock_raw'] = stock
             break
 
     return data
@@ -254,67 +319,124 @@ def _parse_sheet5(raw):
 # STEP 2 — BUILD MASTER TABLE
 # ─────────────────────────────────────────────────────────────────
 def build_master(data):
+    """
+    Build master item table from parsed raw data.
+    Adds: material group, order fill rate, lead time weeks.
+    """
+    YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+    LEAD_TIME_WEEKS = 25  # Standard lead time per client
+
+    def get_source(key, alt_keys=[]):
+        for k in [key] + alt_keys:
+            if k in data and data[k] is not None and not data[k].empty:
+                return data[k]
+        return None
+
+    # Gather all unique item codes across all sources
     all_items = set()
-    for key in ["quotation_pivot", "so_pivot", "purchase_pivot"]:
-        if key in data and data[key] is not None:
-            all_items.update(data[key]["ItemCode"].tolist())
-    if "stock" in data and data["stock"] is not None:
-        all_items.update(data["stock"]["ItemCode"].tolist())
-    all_items = {i for i in all_items if i and i != "nan" and len(i) > 3}
+    for key in ['quotation_raw','sales_raw','purchase_raw','stock_raw']:
+        src = get_source(key)
+        if src is not None:
+            all_items.update(src.index.tolist() if hasattr(src,'index') else [])
 
-    rows = []
-    for item in sorted(all_items):
-        row = {"ItemCode": item}
-        for key, prefix in [("quotation_pivot", "Inq"), ("so_pivot", "Sales"), ("purchase_pivot", "Purch")]:
-            df = data.get(key)
-            for yr in YEARS:
-                col = f"{prefix}_{yr}"
-                if df is not None and yr in df.columns:
-                    match = df[df["ItemCode"] == item]
-                    row[col] = float(match[yr].sum()) if not match.empty else 0.0
-                else:
-                    row[col] = 0.0
+    master = pd.DataFrame({'ItemCode': sorted(all_items)})
+    master = master.set_index('ItemCode')
 
-        st = data.get("stock")
-        if st is not None:
-            m = st[st["ItemCode"] == item]
-            row["QOH"]          = float(m["01-QOH"].iloc[0])          if not m.empty and "01-QOH"          in m.columns else 0
-            row["OpenSO"]       = float(m["01-Open SO"].iloc[0])       if not m.empty and "01-Open SO"      in m.columns else 0
-            row["AvailStock"]   = float(m["01-Avail Stock"].iloc[0])   if not m.empty and "01-Avail Stock"  in m.columns else 0
-            row["IncomingPO"]   = float(m["01 PO"].iloc[0])            if not m.empty and "01 PO"           in m.columns else 0
-            row["NetAvailStock"]= float(m["01-Net Avail Stock"].iloc[0])if not m.empty and "01-Net Avail Stock" in m.columns else 0
-            row["ItemCost"]     = float(m["Item Cost"].iloc[0])         if not m.empty and "Item Cost"       in m.columns else 0
-        else:
-            for f in ["QOH","OpenSO","AvailStock","IncomingPO","NetAvailStock","ItemCost"]:
-                row[f] = 0
+    # ── Quotation by year ──
+    qpv = get_source('quotation_raw')
+    for y in YEARS:
+        col = y if qpv is not None and y in qpv.columns else None
+        master[f'Inq_{y}'] = qpv[y].reindex(master.index, fill_value=0) if col else 0
 
-        pr = data.get("pricing")
-        if pr is not None:
-            m = pr[pr["ItemCode"] == item]
-            row["UnitPriceUSD_mtr"] = float(m["UnitPriceUSD_mtr"].iloc[0]) if not m.empty and "UnitPriceUSD_mtr" in m.columns else 0
-            row["LeadTimeWeeks"]    = float(m["LeadTimeWeeks"].iloc[0])     if not m.empty and "LeadTimeWeeks"    in m.columns else 8
-            row["PricePerLength"]   = float(m["PricePerLength"].iloc[0])    if not m.empty and "PricePerLength"   in m.columns else 0
-            row["Origin"]           = str(m["Origin"].iloc[0])              if not m.empty and "Origin"           in m.columns else ""
-        else:
-            row["UnitPriceUSD_mtr"] = 0; row["LeadTimeWeeks"] = 8
-            row["PricePerLength"] = 0;   row["Origin"] = ""
+    # ── Sales by year ──
+    spv = get_source('sales_raw')
+    for y in YEARS:
+        col = y if spv is not None and y in spv.columns else None
+        master[f'Sales_{y}'] = spv[y].reindex(master.index, fill_value=0) if col else 0
 
-        ms = data.get("master_sheet")
-        if ms is not None:
-            m = ms[ms["ItemCode"] == item]
-            row["ProposedQty_manual"] = float(m["ProposedQty_manual"].iloc[0]) if not m.empty and "ProposedQty_manual" in m.columns else np.nan
-        else:
-            row["ProposedQty_manual"] = np.nan
+    # ── Purchase by year ──
+    ppv = get_source('purchase_raw')
+    for y in YEARS:
+        col = y if ppv is not None and y in ppv.columns else None
+        master[f'Purch_{y}'] = ppv[y].reindex(master.index, fill_value=0) if col else 0
 
-        rows.append(row)
+    # ── Stock position ──
+    stk = get_source('stock_raw')
+    if stk is not None:
+        for col in ['QOH','OpenSO','AvailStock','IncomingPO','NetAvailStock','ItemCost']:
+            master[col] = stk[col].reindex(master.index, fill_value=0) if col in stk.columns else 0
+    else:
+        for col in ['QOH','OpenSO','AvailStock','IncomingPO','NetAvailStock','ItemCost']:
+            master[col] = 0
 
-    master = pd.DataFrame(rows).fillna(0)
+    # ── Override IncomingPO from raw open POs ──
+    inc_po = get_source('incoming_po_raw')
+    if inc_po is not None:
+        master['IncomingPO'] = inc_po.reindex(master.index, fill_value=0)
+
+    # ── Recalculate NetAvailStock ──
+    master['NetAvailStock'] = master['QOH'] + master['IncomingPO'] - master['OpenSO']
+
+    # ── Open SO from raw ──
+    open_so = get_source('open_so')
+    if open_so is not None:
+        master['OpenSO'] = open_so.reindex(master.index, fill_value=0)
+
+    # ── Order Fill Rate ──
+    fr = get_source('fill_rate')
+    if fr is not None:
+        master['FillRate'] = fr['fill_rate'].reindex(master.index, fill_value=np.nan)
+    else:
+        master['FillRate'] = np.nan
+
+    # ── Price per length (from ItemCost, no 144 PRICE sheet) ──
+    master['PricePerLength'] = master['ItemCost'].clip(lower=0)
+
+    # ── Lead time ──
+    master['LeadTimeWeeks'] = LEAD_TIME_WEEKS
+
+    # ── Totals ──
+    master['TotalInquiry'] = master[[f'Inq_{y}' for y in YEARS]].sum(axis=1)
+    master['TotalSales']   = master[[f'Sales_{y}' for y in YEARS]].sum(axis=1)
+    master['TotalPurchase']= master[[f'Purch_{y}' for y in YEARS]].sum(axis=1)
+
+    # ── Material Group ──
+    EXOTIC_PREFIXES = ['254','2507','625','A400','A825','C276','825']
+    def classify_material(code):
+        code_str = str(code).strip()
+        for pfx in EXOTIC_PREFIXES:
+            if code_str.startswith(pfx):
+                return 'Exotic / Special Alloy'
+        if code_str.upper().startswith('TI'):
+            return 'Tungsten'
+        if code_str.upper().startswith('CU'):
+            return 'Copper'
+        return 'Stainless Steel'
+    master['MaterialGroup'] = master.index.to_series().apply(classify_material)
+
+    # ── Item classification (for algorithm) ──
+    def classify_item(row):
+        years_with_sales = sum(1 for y in YEARS if row[f'Sales_{y}'] > 0)
+        years_with_inq   = sum(1 for y in YEARS if row[f'Inq_{y}'] > 0)
+        total_sales = row['TotalSales']
+        if total_sales == 0 and row['TotalInquiry'] == 0:
+            return 'DEAD'
+        if years_with_sales >= 4:
+            return 'FAST_MOVER'
+        if years_with_sales >= 2:
+            return 'SLOW_MOVER'
+        if years_with_inq >= 2 or row['TotalInquiry'] > 100:
+            return 'PROJECT'
+        return 'DEAD'
+    master['ItemClass'] = master.apply(classify_item, axis=1)
+
+    # ── Pricing proxy ──
+    master['EstCostUSD'] = (master['TotalSales'] * master['PricePerLength']).fillna(0)
+
+    master = master.reset_index()
     return master
 
 
-# ─────────────────────────────────────────────────────────────────
-# STEP 3 — WMSPS ALGORITHM
-# ─────────────────────────────────────────────────────────────────
 def run_algorithm(master):
     df = master.copy()
 
@@ -529,7 +651,7 @@ def run_forecast(df):
 # ─────────────────────────────────────────────────────────────────
 # SWAGELOK DECISION MATRIX ENGINE
 # ─────────────────────────────────────────────────────────────────
-def apply_decision_matrix(df):
+def apply_decision_matrix(df, months_window=12):
     """
     Implements Swagelok's official Decision Matrix (from internal slide):
 
@@ -550,9 +672,17 @@ def apply_decision_matrix(df):
 
     df = df.copy()
 
-    # Past 12 months = 2025 full + 2026 annualised
-    df['Inq_12M']   = df['Inq_2025']   + df['Inq_2026']   * (12 / MONTHS_2026)
-    df['Sales_12M'] = df['Sales_2025'] + df['Sales_2026'] * (12 / MONTHS_2026)
+    if months_window == 24:
+        # Past 24 months = 2024 full + 2025 full + 2026 annualised
+        df['Inq_12M']   = df['Inq_2024']   + df['Inq_2025']   + df['Inq_2026']   * (12 / MONTHS_2026)
+        df['Sales_12M'] = df['Sales_2024'] + df['Sales_2025'] + df['Sales_2026'] * (12 / MONTHS_2026)
+        # Normalise to per-12-month equivalent for threshold comparison
+        df['Inq_12M']   = df['Inq_12M']   / 2
+        df['Sales_12M'] = df['Sales_12M'] / 2
+    else:
+        # Past 12 months = 2025 full + 2026 annualised
+        df['Inq_12M']   = df['Inq_2025']   + df['Inq_2026']   * (12 / MONTHS_2026)
+        df['Sales_12M'] = df['Sales_2025'] + df['Sales_2026'] * (12 / MONTHS_2026)
 
     # Quotation: High = > 100 pcs in past 12 months
     df['Q_High']   = df['Inq_12M'] >= 100
@@ -743,7 +873,8 @@ def run_full_analysis(file_bytes, filename):
     scored = run_algorithm(master)
     result = run_forecast(scored)
     # Apply Swagelok Decision Matrix
-    result = apply_decision_matrix(result)
+    months_window = st.session_state.get('months_window', 12)
+    result = apply_decision_matrix(result, months_window=months_window)
     # Apply ABC-XYZ + Combined Algorithm
     result = apply_abc_xyz(result)
     # Apply learned correction factors if available
@@ -1100,7 +1231,6 @@ def _show_forecast_chart(row):
 
 
 
-
 # ─────────────────────────────────────────────────────────────────
 # LEARNING DASHBOARD
 # ─────────────────────────────────────────────────────────────────
@@ -1435,6 +1565,9 @@ def _show_procurement_board(df):
 
     # ── KPIs ──
     board = _procurement_board_filter(df)
+    # Apply material group filter
+    if selected_mat != 'All Materials' and 'MaterialGroup' in board.columns:
+        board = board[board['MaterialGroup'] == selected_mat]
     if 'Final_Action' in board.columns:
         pri_buy  = board[board.Final_Action=='BUY (PRIORITY)']
         buy      = board[board.Final_Action.isin(['BUY','BUY (PRIORITY)','MONITOR / BUY','BUY (CONTROLLED)','REVIEW / BUY'])]
@@ -1457,11 +1590,30 @@ def _show_procurement_board(df):
     st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
 
     # ── Filter ──
-    view_opt = st.radio(
-        "Filter by action:",
-        ["🔥 BUY Priority (AX)", "🟢 All BUY", "👁️ Review", "🔵 Monitor", "⚖️ Limit/Control", "📋 All Actionable"],
-        horizontal=True, key="abc_filter"
-    )
+    # ── Material group filter ──
+    mat_groups = ['All Materials', 'Stainless Steel', 'Exotic / Special Alloy', 'Copper', 'Tungsten']
+    selected_mat = st.selectbox('Filter by material group:', mat_groups, key='mat_group_filter')
+
+    # ── 12M / 24M toggle ──
+    col_toggle, col_filter = st.columns([1, 4])
+    with col_toggle:
+        period = st.radio(
+            "Analysis period:",
+            ["12 Months", "24 Months"],
+            horizontal=True, key="period_toggle"
+        )
+        new_window = 24 if period == "24 Months" else 12
+        if st.session_state.get('months_window', 12) != new_window:
+            st.session_state['months_window'] = new_window
+            st.cache_data.clear()
+            st.rerun()
+
+    with col_filter:
+        view_opt = st.radio(
+            "Filter by action:",
+            ["🔥 BUY Priority (AX)", "🟢 All BUY", "👁️ Review", "🔵 Monitor", "⚖️ Limit/Control", "📋 All Actionable"],
+            horizontal=True, key="abc_filter"
+        )
     if "Priority" in view_opt:   show_df = pri_buy
     elif "All BUY" in view_opt:  show_df = buy
     elif "Review"  in view_opt:  show_df = review
@@ -1474,9 +1626,10 @@ def _show_procurement_board(df):
         return
 
     # ── Table ──
-    want = ['ItemCode','ABC_XYZ','Final_Action','DM_Action',
+    want = ['ItemCode','MaterialGroup','ABC_XYZ','Final_Action','DM_Action',
             'Q_Label','PO_Label','Stock_Label',
             'Inq_12M','Conv_12M','Sales_12M',
+            'FillRate',
             'QOH','OpenSO','IncomingPO','NetAvailStock',
             'StockCoverDays','ProposedQty_6M',
             'F6M_Mid','StockoutMonth','CoV','Final_Reason']
@@ -1484,6 +1637,7 @@ def _show_procurement_board(df):
     disp  = show_df[avail].copy()
     rename = {
         'ItemCode':      'Item Code',
+        'MaterialGroup': 'Material',
         'ABC_XYZ':       'Class',
         'Final_Action':  'Decision',
         'DM_Action':     'Mkt Signal',
@@ -1493,6 +1647,7 @@ def _show_procurement_board(df):
         'Inq_12M':       'Inq 12M',
         'Conv_12M':      'Conv %',
         'Sales_12M':     'Sales 12M',
+        'FillRate':      'Fill Rate',
         'QOH':           'QOH (On Hand)',
         'OpenSO':        'Open SO',
         'IncomingPO':    'Incoming PO',
@@ -1506,13 +1661,14 @@ def _show_procurement_board(df):
     }
     disp = disp.rename(columns={k:v for k,v in rename.items() if k in disp.columns})
     if 'Conv %'       in disp: disp['Conv %']        = (disp['Conv %']*100).round(1).astype(str)+'%'
+    if 'Fill Rate'    in disp: disp['Fill Rate']     = disp['Fill Rate'].apply(lambda x: f'{x:.1%}' if pd.notna(x) else '—')
     if 'Inq 12M'      in disp: disp['Inq 12M']       = disp['Inq 12M'].round(0).astype(int)
     if 'Sales 12M'    in disp: disp['Sales 12M']      = disp['Sales 12M'].round(0).astype(int)
     if 'QOH (On Hand)'in disp: disp['QOH (On Hand)'] = disp['QOH (On Hand)'].round(0).astype(int)
     if 'Open SO'      in disp: disp['Open SO']        = disp['Open SO'].round(0).astype(int)
     if 'Incoming PO'  in disp: disp['Incoming PO']    = disp['Incoming PO'].round(0).astype(int)
     if 'Net Stock'    in disp: disp['Net Stock']      = disp['Net Stock'].round(0).astype(int)
-    if 'Cover Days'   in disp: disp['Cover Days']     = disp['Cover Days'].round(0).astype(int)
+    if 'Cover Days'   in disp: disp['Cover Days']     = disp['Cover Days'].apply(lambda x: '∞' if x >= 9999 else str(int(x)))
     if 'Proposed Buy' in disp: disp['Proposed Buy']   = disp['Proposed Buy'].round(0).astype(int)
     if '6M Demand'    in disp: disp['6M Demand']      = disp['6M Demand'].round(1)
     if 'CoV'          in disp: disp['CoV']            = disp['CoV'].round(2)
@@ -1986,7 +2142,7 @@ def main():
         uploaded = st.file_uploader(
             "Drop your .xlsx file here",
             type=["xlsx","xls"],
-            help="Upload the SAP Excel export containing: Quotation-Table, SO-Table, Purchase-Table, Tubing Stock balance, 144 PRICE sheets"
+            help="Upload the SAP Excel export containing: Quotation-Table, SO-Table, Purchase-Table, Tubing Stock balance sheets"
         )
 
         st.markdown("---")
