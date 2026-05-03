@@ -2105,12 +2105,6 @@ def _show_board_item_detail(row, YEARS):
 
 def show_login():
     """Display the login page."""
-    st.set_page_config(
-        page_title="Tubing Purchase Visulizer — Login",
-        page_icon="🔩",
-        layout="centered",
-    )
-    
     st.markdown("""
     <div style="background:#1A1A2E;padding:40px;border-radius:12px;margin-top:60px;text-align:center">
         <div style="font-size:40px;margin-bottom:10px"> </div>
@@ -2142,13 +2136,14 @@ def show_login():
 
 
 def main():
-    init_db()   # ensure SQLite tables exist
     st.set_page_config(
         page_title="Tubing Purchase Visulizer — Procurement Intelligence",
-        page_icon=" ",
+        page_icon="🔩",
         layout="wide",
         initial_sidebar_state="expanded",
     )
+    
+    init_db()   # ensure SQLite tables exist
     
     # Check authentication
     if "authenticated" not in st.session_state:
