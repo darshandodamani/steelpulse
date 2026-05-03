@@ -89,7 +89,7 @@ def parse_excel(uploaded_file):
       - Tubing Purchase     → purchase data by item/date
       - Tubing Stock balance → current stock position per item
     Sheets NOT used: Sheet5 (manual), TP History (pivot), Purchase-Table (pivot),
-      Quotation-Table (pivot), SO-Table (pivot), 144 PRICE, Date
+      Quotation-Table (pivot), SO-Table (pivot), Date
     """
     import warnings
     warnings.filterwarnings("ignore")
@@ -390,7 +390,7 @@ def build_master(data):
     else:
         master['FillRate'] = np.nan
 
-    # ── Price per length (from ItemCost, no 144 PRICE sheet) ──
+    # ── Price per length (from ItemCost) ──
     master['PricePerLength'] = master['ItemCost'].clip(lower=0)
 
     # ── Lead time ──
@@ -2103,14 +2103,60 @@ def _show_board_item_detail(row, YEARS):
     """, unsafe_allow_html=True)
 
 
+def show_login():
+    """Display the login page."""
+    st.set_page_config(
+        page_title="Tubing Purchase Visulizer — Login",
+        page_icon="🔩",
+        layout="centered",
+    )
+    
+    st.markdown("""
+    <div style="background:#1A1A2E;padding:40px;border-radius:12px;margin-top:60px;text-align:center">
+        <div style="font-size:40px;margin-bottom:10px"> </div>
+        <div style="font-size:28px;font-weight:800;color:#fff;margin-bottom:30px">
+            Tubing Purchase Visulizer
+        </div>
+        <div style="color:#888;font-size:14px">Procurement Intelligence Platform</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("<div style='margin:30px 0'></div>", unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("<h3 style='text-align:center'>Login</h3>", unsafe_allow_html=True)
+        username = st.text_input("Username", placeholder="Please enter your username")
+        password = st.text_input("Password", type="password", placeholder="Please enter your password")
+        
+        st.markdown("<div style='margin:20px 0'></div>", unsafe_allow_html=True)
+        
+        if st.button("🔓 Login", use_container_width=True):
+            # Verify credentials
+            if username == "dwaraka" and password == "dwaraka123":
+                st.session_state.authenticated = True
+                st.success("✅ Login successful!")
+                st.rerun()
+            else:
+                st.error("❌ Invalid username or password")
+
+
 def main():
     init_db()   # ensure SQLite tables exist
     st.set_page_config(
         page_title="Tubing Purchase Visulizer — Procurement Intelligence",
-        page_icon="🔩",
+        page_icon=" ",
         layout="wide",
         initial_sidebar_state="expanded",
     )
+    
+    # Check authentication
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    
+    if not st.session_state.authenticated:
+        show_login()
+        return
 
     # ── Global CSS ──
     st.markdown("""
@@ -2126,19 +2172,26 @@ def main():
     """, unsafe_allow_html=True)
 
     # ── Header ──
-    st.markdown("""
-    <div style="background:#1A1A2E;padding:16px 24px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
-      <span style="font-size:28px;font-weight:800;color:#fff">🔩 Steel<span style="color:#f0a500">Pulse</span></span>
-      <span style="color:#555;font-size:13px">| Procurement Intelligence Platform</span>
-      <span style="margin-left:auto;color:#888;font-size:11px">WMSPS Algorithm + TWMAP 6-Month Forecast</span>
-    </div>
-    """, unsafe_allow_html=True)
+    header_col1, header_col2, header_col3 = st.columns([8, 1, 1])
+    with header_col1:
+        st.markdown("""
+        <div style="background:#1A1A2E;padding:32px 24px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
+          <span style="font-size:28px;font-weight:800;color:#fff"> Tubing <span style="color:#f0a500"> Purchase</span></span>
+          <span style="color:#555;font-size:13px">| Procurement Intelligence Platform</span>
+          <span style="margin-left:auto;color:#888;font-size:11px">WMSPS Algorithm + TWMAP 6-Month Forecast</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with header_col3:
+        st.markdown("<div style='margin-top:3px'></div>", unsafe_allow_html=True)
+        if st.button(" Logout", key="logout_btn", use_container_width=True):
+            st.session_state.authenticated = False
+            st.rerun()
 
     # ─────────────────────────────────
     # SIDEBAR
     # ─────────────────────────────────
     with st.sidebar:
-        st.markdown("### 📁 Upload SAP Export")
+        st.markdown("###  Upload SAP Export")
         uploaded = st.file_uploader(
             "Drop your .xlsx file here",
             type=["xlsx","xls"],
@@ -2146,15 +2199,15 @@ def main():
         )
 
         st.markdown("---")
-        st.markdown("### 🔍 Filters")
+        st.markdown("###  Filters")
         filter_signal = st.multiselect("Signal", ["BUY","WATCH","HOLD","SKIP"], default=[])
         filter_class  = st.multiselect("Item Class", ["FAST_MOVER","SLOW_MOVER","PROJECT","DEAD"], default=[])
-        filter_risk   = st.checkbox("⚠️ Stockout Risk Only", value=False)
+        filter_risk   = st.checkbox("Stockout Risk Only", value=False)
         search_term   = st.text_input("Search Item Code", placeholder="e.g. SS-T8-S-065")
 
         st.markdown("---")
-        st.markdown("### 📖 Required Sheets")
-        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance","144 PRICE"]:
+        st.markdown("### Required Sheets")
+        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance"]:
             st.markdown(f"- `{s}`")
 
         st.markdown("---")
@@ -2172,7 +2225,7 @@ def main():
     if uploaded is None:
         st.markdown("""
         <div style="text-align:center;padding:80px 20px;background:#111318;border-radius:12px;border:2px dashed #444">
-          <div style="font-size:60px;margin-bottom:16px">🔩</div>
+          <div style="font-size:60px;margin-bottom:16px"> </div>
           <div style="font-size:24px;font-weight:700;color:#ffffff;margin-bottom:8px">Upload your SAP Excel export to begin</div>
           <div style="font-size:14px;color:#aaa">Drag and drop your .xlsx file in the sidebar<br>
           The algorithm will process all sheets automatically</div>
@@ -2193,13 +2246,13 @@ def main():
         return
 
     # ── Run analysis ──
-    with st.spinner("⚙️ Running WMSPS algorithm + TWMAP 6-month forecast..."):
+    with st.spinner(" Running WMSPS algorithm + TWMAP 6-month forecast..."):
         try:
             file_bytes = uploaded.read()
             df = run_full_analysis(file_bytes, uploaded.name)
         except Exception as e:
-            st.error(f"❌ Error processing file: {str(e)}")
-            st.info("💡 Make sure your file contains: Quotation-Table, SO-Table/TSO Table, Purchase-Table/TP History, Tubing Stock balance, and 144 PRICE sheets.")
+            st.error(f" Error processing file: {str(e)}")
+            st.info(" Make sure your file contains: Quotation-Table, SO-Table/TSO Table, Purchase-Table/TP History, and Tubing Stock balance sheets.")
             st.stop()
 
     summary = compute_summary(df)
