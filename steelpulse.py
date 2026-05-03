@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║       Tubing Sales Visualizer — Inquiry-to-Sales Analytics      ║
+║          Tubing Purchase Visulizer — Procurement Intelligence Platform          ║
 ║          Streamlit Single-File App  |  Version 2.0               ║
 ║                                                                  ║
 ║  ALGORITHM: Weighted Multi-Signal Procurement Scoring (WMSPS)   ║
@@ -167,9 +167,10 @@ def parse_excel(uploaded_file):
             raw['Year'] = raw['DocDate'].dt.year
             raw['Quantity'] = pd.to_numeric(raw['Quantity'], errors='coerce').fillna(0)
             raw['OpenQty'] = pd.to_numeric(raw['OpenQty'], errors='coerce').fillna(0)
-            # Historical purchases (closed lines)
-            closed_purch = raw[raw['LineStatus'] == 'C']
-            pv = closed_purch[closed_purch['Year'].isin(YEARS)].groupby(['ItemCode','Year'])['Quantity'].sum().unstack(fill_value=0)
+            # Historical purchases — ALL lines (C=closed + O=open) by DocDate
+            # Client confirmed: they count PO quantity from DocDate (when PO was created),
+            # not ShipDate. Include both closed and open so 2026 open POs are counted.
+            pv = raw[raw['Year'].isin(YEARS)].groupby(['ItemCode','Year'])['Quantity'].sum().unstack(fill_value=0)
             pv.columns = [int(c) for c in pv.columns]
             for y in YEARS:
                 if y not in pv.columns: pv[y] = 0
@@ -944,7 +945,7 @@ def build_excel_export(df):
 
         # ── Sheet 1: Executive Summary ──
         ws = wb.add_worksheet("Executive Summary")
-        ws.write(0, 0, "Tubing Sales Visualizer — Inquiry-to-Sales Report", title_fmt)
+        ws.write(0, 0, "🔩 Tubing Purchase Visualizer — Procurement Intelligence Report", title_fmt)
         ws.write(1, 0, f"Generated: {datetime.now().strftime('%d %B %Y %H:%M')}")
         summary = compute_summary(df)
         kpi_data = [
@@ -1158,7 +1159,7 @@ def _show_item_detail(row):
             "Forecast Confidence":   str(row.ForecastConf),
         }
         param_df = pd.DataFrame(params.items(), columns=["Parameter","Value"])
-        st.dataframe(param_df.set_index("Parameter"), width='stretch')
+        st.dataframe(param_df.set_index("Parameter"), use_container_width=True)
 
     with col_r:
         # 6M forecast chart
@@ -1182,7 +1183,7 @@ def _show_item_detail(row):
         fig.update_layout(title=f"6-Month Forecast — {row.ItemCode}",
                           height=260, plot_bgcolor="#fafafa",
                           legend=dict(orientation="h",yanchor="bottom",y=1.02))
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, use_container_width=True)
 
         # History chart
         hist = pd.DataFrame({
@@ -1196,7 +1197,7 @@ def _show_item_detail(row):
                       title="6-Year History")
         fig2.update_layout(height=240, plot_bgcolor="#fafafa",
                            legend=dict(orientation="h",yanchor="bottom",y=1.02))
-        st.plotly_chart(fig2, width='stretch')
+        st.plotly_chart(fig2, use_container_width=True)
 
 
 def _show_forecast_chart(row):
@@ -1220,14 +1221,13 @@ def _show_forecast_chart(row):
         height=320, plot_bgcolor="#fafafa",
         legend=dict(orientation="h",yanchor="bottom",y=1.02)
     )
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, use_container_width=True)
 
     c1,c2,c3,c4 = st.columns(4)
     with c1: st.metric("6M Demand (Mid)",  f"{row.F6M_Mid:.0f} lengths")
     with c2: st.metric("Stock End (Mid)",   f"{row.StockEnd_Mid:.0f}", delta=None)
     with c3: st.metric("Proposed Buy",      f"{int(row.ProposedQty_6M):,} lengths")
     with c4: st.metric("Stockout Risk",     str(row.StockoutMonth) if row.HasStockoutRisk else "✅ None")
-
 
 
 
@@ -1290,7 +1290,7 @@ def _show_learning_dashboard(result_df):
             fig.update_layout(height=260, plot_bgcolor="#fafafa",
                               xaxis_title="Number of items",
                               margin=dict(l=0, r=40, t=10, b=10))
-            st.plotly_chart(fig, width='stretch')
+            st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("""
             <div style="background:#f8f9fa;border-radius:6px;padding:12px;font-size:12px;line-height:1.8">
@@ -1326,7 +1326,7 @@ def _show_learning_dashboard(result_df):
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
                 margin=dict(l=0, r=0, t=10, b=10)
             )
-            st.plotly_chart(fig2, width='stretch')
+            st.plotly_chart(fig2, use_container_width=True)
         else:
             st.markdown("**📈 Model Accuracy**")
             st.markdown("""
@@ -1385,7 +1385,7 @@ def _show_learning_dashboard(result_df):
         disp_show = disp_show.sort_values("Error %", ascending=False)
 
         st.dataframe(disp_show.set_index("Item Code"),
-                 width='stretch', height=380)
+                     use_container_width=True, height=380)
 
         st.caption(f"Showing {len(disp_show)} items · CF = Actual ÷ Predicted (applied to all future forecasts)")
 
@@ -1418,8 +1418,8 @@ def _show_learning_dashboard(result_df):
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             margin=dict(b=80)
         )
-        st.plotly_chart(fig3, width='stretch')
-        st.dataframe(comp.set_index("Item").round(1), width='stretch')
+        st.plotly_chart(fig3, use_container_width=True)
+        st.dataframe(comp.set_index("Item").round(1), use_container_width=True)
 
     st.markdown("---")
 
@@ -1432,7 +1432,7 @@ def _show_learning_dashboard(result_df):
             "buy_signals","stockout_risk","total_proposed_qty"
         ]].copy()
         disp_up.columns = ["File","Uploaded At","Items","BUY Signals","Stockout Risk","Proposed Qty"]
-        st.dataframe(disp_up.set_index("File"), width='stretch')
+        st.dataframe(disp_up.set_index("File"), use_container_width=True)
     else:
         st.info("No uploads recorded yet.")
 
@@ -1501,7 +1501,7 @@ def _procurement_board_filter(df):
 
 def _show_procurement_board(df):
     YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
-    st.markdown("#### 🎯 Procurement Board — ABC-XYZ + Decision Matrix")
+    st.markdown("#### 🛒 Tubing Purchase — ABC-XYZ + Decision Matrix")
 
     # ── Algorithm explanation ──
     with st.expander("📖 How this algorithm works — click to expand", expanded=False):
@@ -1563,11 +1563,13 @@ def _show_procurement_board(df):
         """
         st.markdown(matrix_html, unsafe_allow_html=True)
 
-    # ── KPIs ──
-    board = _procurement_board_filter(df)
-    # ── Material group filter selector (move before applying filter)
+    # ── Filter ──
+    # ── Material group filter ──
     mat_groups = ['All Materials', 'Stainless Steel', 'Exotic / Special Alloy', 'Copper', 'Tungsten']
     selected_mat = st.selectbox('Filter by material group:', mat_groups, key='mat_group_filter')
+
+    # ── KPIs ──
+    board = _procurement_board_filter(df)
     # Apply material group filter
     if selected_mat != 'All Materials' and 'MaterialGroup' in board.columns:
         board = board[board['MaterialGroup'] == selected_mat]
@@ -1592,7 +1594,6 @@ def _show_procurement_board(df):
 
     st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
 
-    # ── Filter ──
     # ── 12M / 24M toggle ──
     col_toggle, col_filter = st.columns([1, 4])
     with col_toggle:
@@ -1697,7 +1698,7 @@ def _show_procurement_board(df):
 
     st.dataframe(
         disp.set_index('Item Code').style.apply(_color_row, axis=1),
-        width='stretch', height=480
+        use_container_width=True, height=480
     )
     st.caption(
         f"Showing {len(show_df)} items  |  "
@@ -1789,7 +1790,7 @@ def _show_procurement_board(df):
         margin=dict(b=100, t=40, l=60, r=20),
         hovermode='x unified',
     )
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, use_container_width=True)
 
     # ── Net Stock vs 6M Demand scatter ──
     st.markdown("#### 🎯 Net Stock vs 6-Month Demand — Risk View")
@@ -1875,7 +1876,7 @@ def _show_procurement_board(df):
         legend=dict(orientation='h', yanchor='bottom', y=-0.35),
         margin=dict(b=120),
     )
-    st.plotly_chart(fig2, width='stretch')
+    st.plotly_chart(fig2, use_container_width=True)
 
     # ── Item detail ──
     st.markdown("---")
@@ -1978,7 +1979,7 @@ def _show_board_item_detail(row, YEARS):
             showlegend=False,
             margin=dict(t=20, b=20)
         )
-        st.plotly_chart(fig_inq, width='stretch')
+        st.plotly_chart(fig_inq, use_container_width=True)
 
     with col_right:
         # Sales trend chart — LINE
@@ -2012,7 +2013,7 @@ def _show_board_item_detail(row, YEARS):
             legend=dict(orientation='h', yanchor='bottom', y=1.02),
             margin=dict(t=20, b=20)
         )
-        st.plotly_chart(fig_sales, width='stretch')
+        st.plotly_chart(fig_sales, use_container_width=True)
 
     # ── Year by year table ──
     st.markdown(f"**📋 Full Year-by-Year History — {item}**")
@@ -2046,7 +2047,7 @@ def _show_board_item_detail(row, YEARS):
 
     st.dataframe(
         yr_df.style.apply(_color_yr, axis=0),
-        width='stretch'
+        use_container_width=True
     )
 
     # ── Stock breakdown ──
@@ -2102,200 +2103,11 @@ def _show_board_item_detail(row, YEARS):
     """, unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────────────────────────
-# INQUIRY-TO-SALES CONVERSION ANALYSIS
-# ─────────────────────────────────────────────────────────────────
-def _show_inquiry_conversion_analysis(df):
-    """
-    Analyze inquiry-to-sales conversion metrics:
-    - Supply Fill Rate: Can we fulfill?
-    - Sales Conversion Rate: Did customer accept?
-    - Overall Fill Rate: What % of inquiry became sales?
-    """
-    st.markdown("#### 📊 Inquiry-to-Sales Conversion Analysis")
-    st.caption("Track how inquiries convert through the sales pipeline. Identify gaps in supply and customer acceptance.")
-
-    # Calculate overall metrics
-    total_inq = df['TotalInquiry'].sum()
-    total_sales = df['TotalSales'].sum()
-    total_avail_stock = df['AvailStock'].sum()
-    
-    overall_supply_fill = (total_avail_stock / (total_inq + 1e-9)) * 100
-    overall_sales_conv = (total_sales / (total_avail_stock + 1e-9)) * 100 if total_avail_stock > 0 else 0
-    overall_fill_rate = (total_sales / (total_inq + 1e-9)) * 100
-
-    # KPI row
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.metric(
-            "📦 Supply Fill Rate",
-            f"{overall_supply_fill:.1f}%",
-            help="Available Stock ÷ Inquiry — Can you fulfill demand?"
-        )
-    with k2:
-        st.metric(
-            "🎯 Sales Conversion Rate",
-            f"{overall_sales_conv:.1f}%",
-            help="Sales ÷ Available Stock — Did customer accept offer?"
-        )
-    with k3:
-        st.metric(
-            "✅ Overall Fill Rate",
-            f"{overall_fill_rate:.1f}%",
-            help="Sales ÷ Inquiry — What % converted to sales?"
-        )
-    with k4:
-        lost_supply = total_inq - total_avail_stock
-        lost_conversion = total_avail_stock - total_sales
-        total_lost = lost_supply + lost_conversion
-        st.metric(
-            "❌ Total Lost Opportunity",
-            f"{total_lost:,.0f} units",
-            help="Supply gap + Conversion gap"
-        )
-
-    st.markdown("<div style='margin:12px 0'></div>", unsafe_allow_html=True)
-
-    # Breakdown of losses
-    col_l, col_r = st.columns(2)
-    with col_l:
-        st.markdown("**📉 Where We Lose Sales**")
-        lost_supply = max(0, total_inq - total_avail_stock)
-        lost_conversion = max(0, total_avail_stock - total_sales)
-        
-        loss_data = pd.DataFrame([
-            ["No Stock (Supply Gap)", lost_supply, f"{(lost_supply/(total_inq+1e-9))*100:.1f}%", "#ff6b6b"],
-            ["No Sale (Conversion Gap)", lost_conversion, f"{(lost_conversion/(total_inq+1e-9))*100:.1f}%", "#ffa94d"],
-            ["Successful Sales", total_sales, f"{(total_sales/(total_inq+1e-9))*100:.1f}%", "#51cf66"],
-        ], columns=["Category", "Units", "% of Inquiry", "Color"])
-
-        fig_loss = go.Figure(data=[
-            go.Bar(
-                x=loss_data["Category"],
-                y=loss_data["Units"],
-                marker_color=loss_data["Color"],
-                text=loss_data["Units"].apply(lambda x: f"{x:,.0f}"),
-                textposition="outside",
-                name="Units"
-            )
-        ])
-        fig_loss.update_layout(
-            height=300, plot_bgcolor="#fafafa",
-            yaxis_title="Units", showlegend=False,
-            margin=dict(b=60)
-        )
-        st.plotly_chart(fig_loss, width='stretch')
-
-        # Loss breakdown table
-        st.dataframe(
-            loss_data[["Category", "Units", "% of Inquiry"]].set_index("Category"),
-            width='stretch'
-        )
-
-    with col_r:
-        st.markdown("**📈 Item-Level Conversion Performance**")
-        
-        # Per-item conversion analysis
-        conv_df = df.copy()
-        conv_df['Supply_Fill_Rate'] = (conv_df['AvailStock'] / (conv_df['TotalInquiry'] + 1e-9) * 100).round(1)
-        conv_df['Sales_Conv_Rate'] = (conv_df['TotalSales'] / (conv_df['AvailStock'] + 1e-9) * 100).round(1)
-        conv_df['Overall_Fill_Rate'] = (conv_df['TotalSales'] / (conv_df['TotalInquiry'] + 1e-9) * 100).round(1)
-        conv_df['Lost_Supply'] = (conv_df['TotalInquiry'] - conv_df['AvailStock']).clip(lower=0)
-        conv_df['Lost_Conversion'] = (conv_df['AvailStock'] - conv_df['TotalSales']).clip(lower=0)
-        
-        # Filter items with inquiry > 0
-        active_items = conv_df[conv_df['TotalInquiry'] > 0].copy()
-        
-        if len(active_items) > 0:
-            # Distribution of conversion rates
-            fig_dist = px.histogram(
-                active_items,
-                x="Overall_Fill_Rate",
-                nbins=10,
-                title="Distribution of Item Fill Rates (%)",
-                labels={"Overall_Fill_Rate": "Fill Rate %"},
-                color_discrete_sequence=["#4c72b0"]
-            )
-            fig_dist.update_layout(height=300, plot_bgcolor="#fafafa", showlegend=False)
-            st.plotly_chart(fig_dist, width='stretch')
-
-    st.markdown("---")
-    st.markdown("#### 📋 Top Items by Inquiry-to-Sales Gap")
-    st.caption("Items with high inquiry but low conversion — opportunity areas")
-
-    # Items with biggest gaps
-    gap_df = df[df['TotalInquiry'] > 0].copy()
-    gap_df['Supply_Gap'] = (gap_df['TotalInquiry'] - gap_df['AvailStock']).clip(lower=0)
-    gap_df['Conversion_Gap'] = (gap_df['AvailStock'] - gap_df['TotalSales']).clip(lower=0)
-    gap_df['Total_Gap'] = gap_df['Supply_Gap'] + gap_df['Conversion_Gap']
-    gap_df['Supply_Fill_%'] = (gap_df['AvailStock'] / (gap_df['TotalInquiry'] + 1e-9) * 100).round(1)
-    gap_df['Sales_Conv_%'] = (gap_df['TotalSales'] / (gap_df['AvailStock'] + 1e-9) * 100).round(1)
-    
-    gap_display = gap_df.nlargest(15, 'Total_Gap')[[
-        'ItemCode', 'TotalInquiry', 'AvailStock', 'TotalSales',
-        'Supply_Fill_%', 'Sales_Conv_%', 'Supply_Gap', 'Conversion_Gap'
-    ]].copy()
-    gap_display.columns = [
-        'Item Code', 'Inquiries', 'Available Stock', 'Sales',
-        'Supply Fill %', 'Sales Conv %', 'Supply Gap', 'Conv Gap'
-    ]
-
-    def style_gap_row(row):
-        supply_gap = row.get('Supply Gap', 0)
-        conv_gap = row.get('Conv Gap', 0)
-        if supply_gap > 0 and supply_gap > conv_gap:
-            return ['background-color:#ffe5e5'] * len(row)
-        elif conv_gap > 0:
-            return ['background-color:#fff3cd'] * len(row)
-        return ['background-color:#d4edda'] * len(row)
-
-    st.dataframe(
-        gap_display.style.apply(style_gap_row, axis=1),
-        width='stretch',
-        height=450
-    )
-    st.caption("🔴 Red = Supply gap (no stock) · 🟡 Yellow = Conversion gap (customer didn't buy) · 🟢 Green = Good conversion")
-
-    # Insights section
-    st.markdown("---")
-    st.markdown("#### 💡 Key Insights & Recommendations")
-    
-    insights_col1, insights_col2 = st.columns(2)
-    
-    with insights_col1:
-        st.markdown("**📊 By Supply Gap (Missing Stock)**")
-        supply_gap_items = gap_df[gap_df['Supply_Gap'] > 0].nlargest(5, 'Supply_Gap')
-        if len(supply_gap_items) > 0:
-            for idx, (_, row) in enumerate(supply_gap_items.iterrows(), 1):
-                st.markdown(f"""
-                {idx}. **{row['ItemCode']}**  
-                   • Lost to stockout: {int(row['Supply_Gap']):,} units  
-                   • Supply fill rate: {(row['AvailStock']/(row['TotalInquiry']+1e-9)*100):.1f}%  
-                   → 💡 **Action:** Increase safety stock or reduce lead time
-                """)
-        else:
-            st.success("✅ No significant supply gaps!")
-    
-    with insights_col2:
-        st.markdown("**💰 By Conversion Gap (Customers Didn't Buy)**")
-        conv_gap_items = gap_df[gap_df['Conversion_Gap'] > 0].nlargest(5, 'Conversion_Gap')
-        if len(conv_gap_items) > 0:
-            for idx, (_, row) in enumerate(conv_gap_items.iterrows(), 1):
-                st.markdown(f"""
-                {idx}. **{row['ItemCode']}**  
-                   • Lost to non-conversion: {int(row['Conversion_Gap']):,} units  
-                   • Sales conversion: {(row['TotalSales']/(row['AvailStock']+1e-9)*100):.1f}%  
-                   → 💡 **Action:** Review pricing, quality, or delivery terms
-                """)
-        else:
-            st.success("✅ No significant conversion gaps!")
-
-
 def main():
     init_db()   # ensure SQLite tables exist
     st.set_page_config(
-        page_title="Tubing Sales Visualizer — Inquiry Analytics",
-        page_icon="📊",
+        page_title="Tubing Purchase Visulizer — Procurement Intelligence",
+        page_icon="🔩",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -2315,12 +2127,10 @@ def main():
 
     # ── Header ──
     st.markdown("""
-    <div style="background:#1A1A2E;padding:32px 24px;border-radius:6px;margin-bottom:16px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
-            <div style="font-size:24px;font-weight:800;color:#fff;">Tubing <span style="color:#f0a500;">Sales Visualizer</span></div>
-            <div style="font-size:12px;color:#aaa;text-align:center;flex:grow;">Inquiry-to-Sales Analytics Platform</div>
-            <div style="font-size:10px;color:#888;white-space:nowrap;">WMSPS Algorithm + TWMAP Forecast</div>
-        </div>
+    <div style="background:#1A1A2E;padding:16px 24px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
+      <span style="font-size:28px;font-weight:800;color:#fff">🔩 Steel<span style="color:#f0a500">Pulse</span></span>
+      <span style="color:#555;font-size:13px">| Procurement Intelligence Platform</span>
+      <span style="margin-left:auto;color:#888;font-size:11px">WMSPS Algorithm + TWMAP 6-Month Forecast</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -2344,7 +2154,7 @@ def main():
 
         st.markdown("---")
         st.markdown("### 📖 Required Sheets")
-        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance"]:
+        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance","144 PRICE"]:
             st.markdown(f"- `{s}`")
 
         st.markdown("---")
@@ -2389,7 +2199,7 @@ def main():
             df = run_full_analysis(file_bytes, uploaded.name)
         except Exception as e:
             st.error(f"❌ Error processing file: {str(e)}")
-            st.info("💡 Make sure your file contains: Quotation-Table, SO-Table/TSO Table, Purchase-Table/TP History, and Tubing Stock balance sheets.")
+            st.info("💡 Make sure your file contains: Quotation-Table, SO-Table/TSO Table, Purchase-Table/TP History, Tubing Stock balance, and 144 PRICE sheets.")
             st.stop()
 
     summary = compute_summary(df)
@@ -2423,7 +2233,7 @@ def main():
         st.download_button(
             label="⬇️ Export Excel Report",
             data=excel_buf,
-            file_name=f"Tubing_Sales_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            file_name=f"Tubing_Purchase_Visulizer_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
         )
@@ -2451,8 +2261,8 @@ def main():
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📈 Forecast & Buy Signals",
         "📅 6-Month Projection",
-        "🎯 Procurement Board",
-        "💰 Inquiry-to-Sales",
+        "🛒 Tubing Purchase",
+        "🔄 Conversion Intelligence",
         "📊 Analytics",
         "📋 Balance Sheet",
         "🧠 Learning Dashboard",
@@ -2515,7 +2325,7 @@ def main():
             return [""] * len(row)
 
         sorted_tbl = tbl.sort_values("Score", ascending=False)
-        st.dataframe(sorted_tbl, width='stretch', height=520)
+        st.dataframe(sorted_tbl, use_container_width=True, height=520)
 
         st.caption(f"Showing {len(filtered):,} items · Green = BUY · Blue = WATCH · Red background = Stockout risk · Click column header to sort")
 
@@ -2563,7 +2373,7 @@ def main():
                               xaxis_title="Month", yaxis_title="Lengths",
                               height=340, plot_bgcolor="#fafafa",
                               legend=dict(orientation="h", yanchor="bottom", y=1.02))
-            st.plotly_chart(fig, width='stretch')
+            st.plotly_chart(fig, use_container_width=True)
 
         # ── Stockout risk table ──
         st.markdown("#### ⚠️ Stockout Risk Items")
@@ -2590,7 +2400,7 @@ def main():
                     return ["background-color:#ffe5e5;font-weight:bold"] * len(row)
                 return ["background-color:#fff8e1"] * len(row)
 
-            st.dataframe(risk_display, width='stretch', height=420)
+            st.dataframe(risk_display, use_container_width=True, height=420)
             st.caption("Red rows = stock out within 2 months. Yellow = 3–6 months.")
 
         # ── Per-item forecast chart ──
@@ -2605,16 +2415,16 @@ def main():
 
 
     # ══════════════════════════════════════════════════════════════
-    # TAB 3 — PROCUREMENT BOARD
+    # TAB 3 — TUBING PURCHASE
     # ══════════════════════════════════════════════════════════════
     with tab3:
         _show_procurement_board(df)
 
     # ══════════════════════════════════════════════════════════════
-    # TAB 4 — INQUIRY-TO-SALES CONVERSION
+    # TAB 4 — CONVERSION INTELLIGENCE
     # ══════════════════════════════════════════════════════════════
     with tab4:
-        _show_inquiry_conversion_analysis(df)
+        _show_conversion_analysis(df, uploaded)
 
     # ══════════════════════════════════════════════════════════════
     # TAB 5 — ANALYTICS
@@ -2640,7 +2450,7 @@ def main():
                           color_discrete_map={"Inquiry":"#007bff","Sales":"#28a745","Purchase":"#f0a500"},
                           title="Annual Inquiry vs Sales vs Purchase (all items · lengths)")
             fig2.update_layout(height=320, plot_bgcolor="#fafafa")
-            st.plotly_chart(fig2, width='stretch')
+            st.plotly_chart(fig2, use_container_width=True)
 
             # Conversion rate trend
             conv_df = pd.DataFrame([{
@@ -2653,7 +2463,7 @@ def main():
                            title="Inquiry-to-Sales Conversion Rate (%)",
                            markers=True, color_discrete_sequence=["#fd7e14"])
             fig3.update_layout(height=260, plot_bgcolor="#fafafa")
-            st.plotly_chart(fig3, width='stretch')
+            st.plotly_chart(fig3, use_container_width=True)
 
         with col_b:
             # Signal pie
@@ -2667,7 +2477,7 @@ def main():
                           title="Signal Distribution")
             fig4.update_traces(textposition="inside", textinfo="percent+label")
             fig4.update_layout(height=280, showlegend=False)
-            st.plotly_chart(fig4, width='stretch')
+            st.plotly_chart(fig4, use_container_width=True)
 
             # Class breakdown
             class_data = pd.DataFrame({
@@ -2681,7 +2491,7 @@ def main():
                           title="Item Classification")
             fig5.update_layout(height=250, showlegend=False, plot_bgcolor="#fafafa",
                                yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig5, width='stretch')
+            st.plotly_chart(fig5, use_container_width=True)
 
         # Top items by proposed qty
         st.markdown("#### 🏆 Top Items by Proposed Purchase Quantity")
@@ -2700,14 +2510,14 @@ def main():
                       title="Top 15 Items — Proposed Purchase Quantity (lengths)")
         fig6.update_layout(height=400, plot_bgcolor="#fafafa",
                            yaxis=dict(autorange="reversed"), showlegend=True)
-        st.plotly_chart(fig6, width='stretch')
-        st.dataframe(top_df.set_index("Item Code"), width='stretch')
+        st.plotly_chart(fig6, use_container_width=True)
+        st.dataframe(top_df.set_index("Item Code"), use_container_width=True)
 
 
     # ══════════════════════════════════════════════════════════════
     # TAB 6 — BALANCE SHEET
     # ══════════════════════════════════════════════════════════════
-    with tab6:
+    with tab5:
         st.markdown("#### 📋 Year-wise Balance Sheet — Inquiry vs Sales vs Purchase")
 
         balance_rows = []
@@ -2732,7 +2542,7 @@ def main():
                 return "color:#155724;font-weight:bold" if val >= 0 else "color:#cc0000;font-weight:bold"
             return ""
 
-        st.dataframe(bal_df, width='stretch')
+        st.dataframe(bal_df, use_container_width=True)
 
         # Balance waterfall
         fig7 = make_subplots(specs=[[{"secondary_y": True}]])
@@ -2756,7 +2566,7 @@ def main():
                            title="6-Year History — Inquiry / Sales / Purchase + Conversion Rate")
         fig7.update_yaxes(title_text="Lengths",       secondary_y=False)
         fig7.update_yaxes(title_text="Conv Rate (%)", secondary_y=True)
-        st.plotly_chart(fig7, width='stretch')
+        st.plotly_chart(fig7, use_container_width=True)
 
         # Stock position table
         st.markdown("#### 📦 Current Stock Position")
@@ -2765,13 +2575,13 @@ def main():
         stock_df = stock_df[stock_df.QOH > 0].sort_values("QOH", ascending=False)
         stock_df.columns = ["Item","QOH","Open SO","Avail Stock","Incoming PO",
                              "Net Avail","Class","Signal","Cover Days"]
-        st.dataframe(stock_df.set_index("Item"), width='stretch', height=400)
+        st.dataframe(stock_df.set_index("Item"), use_container_width=True, height=400)
 
 
     # ══════════════════════════════════════════════════════════════
     # TAB 7 — LEARNING DASHBOARD
     # ══════════════════════════════════════════════════════════════
-    with tab7:
+    with tab6:
         _show_learning_dashboard(df)
 
     # ══════════════════════════════════════════════════════════════
@@ -2872,12 +2682,418 @@ def main():
                 ["PROJECT",     "1 big spike year, quiet rest","6M cover + 1mo (manual review)"],
                 ["DEAD",        "Zero sales, <3 total inquiries","Never buy — score forced to 0"],
             ], columns=["Class","Trigger","Buy Logic"])
-            st.dataframe(class_rules.set_index("Class"), width='stretch')
+            st.dataframe(class_rules.set_index("Class"), use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────
 # HELPER: Item detail panel
 # ─────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────
+# CONVERSION INTELLIGENCE TAB
+# ─────────────────────────────────────────────────────────────────
+def _show_conversion_analysis(result_df, uploaded_file):
+    YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+    EXOTIC_PREFIXES = ['254','2507','625','A400','A825','C276','825']
+
+    def mat(code):
+        code = str(code)
+        for p in EXOTIC_PREFIXES:
+            if code.startswith(p): return 'Exotic / Special Alloy'
+        if code.upper().startswith('TI'): return 'Tungsten'
+        if code.upper().startswith('CU'): return 'Copper'
+        return 'Stainless Steel'
+
+    st.markdown("#### 🔄 Conversion Intelligence — Inquiry → Sales Order Analysis")
+
+    st.markdown("""
+    <div style="background:#1A1A2E;border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:12px;color:#ccc">
+    <div style="color:#f0a500;font-weight:700;margin-bottom:8px">📖 What this tab shows and where each metric appears in Tubing Purchase Visulizer</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div>
+        <b style="color:#fff">🔄 Inquiry → Sales Conversion Rate</b><br>
+        How many of the customer inquiries (quotations) become real Sales Orders.
+        <b>Low conversion = lost demand</b> — either to stockouts, pricing, or competitors.<br>
+        <i>Used in: Procurement Board (PO Signal), Algorithm (S2 score), Decision Matrix (PO High/Low)</i>
+      </div>
+      <div>
+        <b style="color:#fff">📦 Order Fill Rate</b><br>
+        Of the Sales Orders received, how many lengths were actually <b>delivered</b>.
+        Low fill rate = stockout or supply failure even after order placed.<br>
+        <i>Used in: Procurement Board table (Fill Rate column), ABC-XYZ analysis</i>
+      </div>
+      <div>
+        <b style="color:#fff">📉 Lost Demand</b><br>
+        Inquiries that never became orders. Could be: exploratory, competitor, no stock.
+        High lost demand on fast movers = likely stockout-driven.<br>
+        <i>Feeds into: 6-Month Forecast (Inquiry Boost), Proposed Buy quantity</i>
+      </div>
+      <div>
+        <b style="color:#fff">⚠️ Important Caveat</b><br>
+        Inquiries ≠ guaranteed demand. Some are exploratory, go to competitors, or never close.
+        Always read conversion alongside: historical trend, stock levels, and customer pattern.
+      </div>
+    </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Load raw data from uploaded file ──
+    try:
+        xl = pd.ExcelFile(uploaded_file)
+        tq = pd.read_excel(uploaded_file, sheet_name='Tubing Quotation', header=3)
+        so_raw = pd.read_excel(uploaded_file, sheet_name='Tubing Sales Order', header=3)
+    except Exception as e:
+        st.error(f"Could not load raw sheets: {e}")
+        return
+
+    tq.columns = tq.columns.str.strip()
+    so_raw.columns = so_raw.columns.str.strip()
+
+    tq['Quote Date'] = pd.to_datetime(tq['Quote Date'], errors='coerce')
+    tq['Year'] = tq['Quote Date'].dt.year
+    tq['Quantity'] = pd.to_numeric(tq['Quantity'], errors='coerce').fillna(0)
+    tq['ItemCode'] = tq['ItemCode'].astype(str).str.strip()
+
+    so_raw['Order Date'] = pd.to_datetime(so_raw['Order Date'], errors='coerce')
+    so_raw['Year'] = so_raw['Order Date'].dt.year
+    so_raw['Quantity'] = pd.to_numeric(so_raw['Quantity'], errors='coerce').fillna(0)
+    so_raw['Delivered Qty'] = pd.to_numeric(so_raw['Delivered Qty'], errors='coerce').fillna(0)
+    so_raw['ItemCode'] = so_raw['ItemCode'].astype(str).str.strip()
+
+    # ── SECTION 1: Year-over-Year Funnel ──
+    st.markdown("---")
+    st.markdown("#### 📅 Year-over-Year Conversion Funnel")
+    st.caption("Total inquiries received → converted to Sales Orders → actually delivered each year")
+
+    yr_data = []
+    for y in YEARS:
+        inq  = tq[tq['Year']==y]['Quantity'].sum()
+        sale = so_raw[so_raw['Year']==y]['Quantity'].sum()
+        deliv= so_raw[so_raw['Year']==y]['Delivered Qty'].sum()
+        conv = sale/inq*100 if inq>0 else 0
+        fill = deliv/sale*100 if sale>0 else 0
+        yr_data.append({'Year':str(y),'Inquiries':inq,'Sales Orders':sale,'Delivered':deliv,
+                        'Conv Rate %':round(conv,1),'Fill Rate %':round(fill,1)})
+    yr_df = pd.DataFrame(yr_data)
+
+    c_left, c_right = st.columns([3, 2])
+
+    with c_left:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            name='Inquiries', x=yr_df['Year'], y=yr_df['Inquiries'],
+            marker_color='#dee2e6', opacity=0.7,
+            text=yr_df['Inquiries'].apply(lambda x: f'{x:,.0f}'),
+            textposition='outside', textfont=dict(size=9)
+        ))
+        fig.add_trace(go.Bar(
+            name='Sales Orders', x=yr_df['Year'], y=yr_df['Sales Orders'],
+            marker_color='#007bff',
+            text=yr_df['Sales Orders'].apply(lambda x: f'{x:,.0f}'),
+            textposition='outside', textfont=dict(size=9)
+        ))
+        fig.add_trace(go.Bar(
+            name='Delivered', x=yr_df['Year'], y=yr_df['Delivered'],
+            marker_color='#28a745',
+            text=yr_df['Delivered'].apply(lambda x: f'{x:,.0f}'),
+            textposition='outside', textfont=dict(size=9)
+        ))
+        fig.add_trace(go.Scatter(
+            name='Conv Rate %', x=yr_df['Year'], y=yr_df['Conv Rate %'],
+            mode='lines+markers+text',
+            line=dict(color='#f0a500', width=2, dash='dot'),
+            marker=dict(size=8, color='#f0a500'),
+            text=yr_df['Conv Rate %'].apply(lambda x: f'{x:.1f}%'),
+            textposition='top center',
+            yaxis='y2'
+        ))
+        fig.update_layout(
+            barmode='group', height=360,
+            plot_bgcolor='#fafafa',
+            yaxis=dict(title='Lengths'),
+            yaxis2=dict(title='Conv Rate %', overlaying='y', side='right',
+                        range=[0, max(yr_df['Conv Rate %'].max()*1.5, 30)]),
+            legend=dict(orientation='h', yanchor='bottom', y=1.02),
+            margin=dict(b=30, t=40)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with c_right:
+        st.markdown("**Year Summary**")
+        yr_show = yr_df[['Year','Inquiries','Sales Orders','Conv Rate %','Fill Rate %']].copy()
+        yr_show['Inquiries'] = yr_show['Inquiries'].apply(lambda x: f'{x:,.0f}')
+        yr_show['Sales Orders'] = yr_show['Sales Orders'].apply(lambda x: f'{x:,.0f}')
+        yr_show['Conv Rate %'] = yr_show['Conv Rate %'].apply(lambda x: f'{x:.1f}%')
+        yr_show['Fill Rate %'] = yr_show['Fill Rate %'].apply(lambda x: f'{x:.1f}%')
+        st.dataframe(yr_show.set_index('Year'), use_container_width=True, height=240)
+
+        st.markdown("""
+        <div style="background:#f8f9fa;border-radius:6px;padding:10px;font-size:11px;margin-top:4px">
+        <b>2022 spike:</b> 1.37M inquiries but only 1.7% converted — suggests large project tenders that did not close.<br>
+        <b>Trend:</b> Conversion improving in 2026 (17.9%) vs 2025 (4.9%) — better stock coverage or fewer speculative inquiries.
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── SECTION 2: Per-Item Conversion Table ──
+    st.markdown("---")
+    st.markdown("#### 🔍 Item-Level Conversion Analysis")
+    st.caption("Inquiries → Sales Orders → Delivered — with lost demand estimate")
+
+    # Build per-item table
+    inq_item   = tq[tq['Year'].isin(YEARS)].groupby('ItemCode')['Quantity'].sum().rename('Total_Inq')
+    sale_item  = so_raw[so_raw['Year'].isin(YEARS)].groupby('ItemCode')['Quantity'].sum().rename('Total_SO')
+    deliv_item = so_raw[so_raw['Year'].isin(YEARS)].groupby('ItemCode')['Delivered Qty'].sum().rename('Total_Delivered')
+
+    item_df = pd.concat([inq_item, sale_item, deliv_item], axis=1).fillna(0)
+    item_df['Conv_Rate']   = (item_df['Total_SO'] / (item_df['Total_Inq']+1e-9)*100).round(1)
+    item_df['Fill_Rate']   = (item_df['Total_Delivered'] / (item_df['Total_SO']+1e-9)*100).round(1)
+    item_df['Lost_Demand'] = (item_df['Total_Inq'] - item_df['Total_SO']).clip(lower=0).round(0)
+    item_df['Material']    = item_df.index.to_series().apply(mat)
+
+    # Merge with result_df for ABC_XYZ, Final_Action, StockoutMonth
+    merge_cols = ['ItemCode','ABC_XYZ','Final_Action','NetAvailStock','StockoutMonth']
+    avail_merge = [c for c in merge_cols if c in result_df.columns]
+    result_sub = result_df[avail_merge].set_index('ItemCode') if 'ItemCode' in result_df.columns else pd.DataFrame()
+    item_df = item_df.join(result_sub, how='left')
+
+    # ── Filters ──
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        mat_filter = st.selectbox('Material:', ['All','Stainless Steel','Exotic / Special Alloy','Copper','Tungsten'], key='conv_mat')
+    with f2:
+        min_inq = st.number_input('Min inquiries:', min_value=0, value=100, step=50, key='conv_min_inq')
+    with f3:
+        sort_by = st.selectbox('Sort by:', ['Total Inquiries','Lost Demand','Conv Rate (Low→High)','Fill Rate (Low→High)'], key='conv_sort')
+
+    filtered = item_df[item_df['Total_Inq'] >= min_inq].copy()
+    if mat_filter != 'All':
+        filtered = filtered[filtered['Material'] == mat_filter]
+
+    sort_map = {
+        'Total Inquiries':        ('Total_Inq', False),
+        'Lost Demand':            ('Lost_Demand', False),
+        'Conv Rate (Low→High)':   ('Conv_Rate', True),
+        'Fill Rate (Low→High)':   ('Fill_Rate', True),
+    }
+    sort_col, sort_asc = sort_map[sort_by]
+    filtered = filtered.sort_values(sort_col, ascending=sort_asc)
+
+    if filtered.empty:
+        st.info("No items match the filter.")
+    else:
+        # ── Conv Rate Distribution (in this filter) ──
+        col_a, col_b = st.columns([2, 3])
+
+        with col_a:
+            buckets = pd.cut(
+                filtered['Conv_Rate'].clip(0,100),
+                bins=[0,10,25,50,75,100],
+                labels=['0–10% (Very Low)','10–25% (Low)','25–50% (Moderate)','50–75% (Good)','75–100% (High)'],
+                include_lowest=True
+            ).value_counts().sort_index()
+
+            colors_pie = ['#dc3545','#fd7e14','#ffc107','#007bff','#28a745']
+            fig_pie = go.Figure(go.Pie(
+                labels=buckets.index.tolist(),
+                values=buckets.values,
+                marker_colors=colors_pie,
+                hole=0.45,
+                textinfo='label+value',
+                textfont=dict(size=10),
+            ))
+            fig_pie.update_layout(
+                height=280,
+                showlegend=False,
+                margin=dict(t=10,b=10,l=0,r=0),
+                annotations=[dict(text=f'<b>{len(filtered)}</b><br>items', x=0.5, y=0.5,
+                                  font_size=13, showarrow=False)]
+            )
+            st.markdown("**Conversion Rate Distribution**")
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        with col_b:
+            # Top 10 by lost demand — scatter
+            top_lost = filtered.nlargest(20, 'Lost_Demand')
+            fig_sc = go.Figure()
+            fig_sc.add_trace(go.Scatter(
+                x=top_lost['Total_Inq'],
+                y=top_lost['Conv_Rate'],
+                mode='markers+text',
+                text=top_lost.index.tolist(),
+                textposition='top center',
+                textfont=dict(size=7),
+                marker=dict(
+                    size=top_lost['Total_SO'].apply(lambda x: max(8, min(40, x/50))),
+                    color=top_lost['Fill_Rate'],
+                    colorscale='RdYlGn',
+                    cmin=0, cmax=100,
+                    showscale=True,
+                    colorbar=dict(title='Fill Rate %', len=0.8)
+                ),
+                hovertemplate='<b>%{text}</b><br>Inq: %{x:,.0f}<br>Conv: %{y:.1f}%<extra></extra>'
+            ))
+            fig_sc.add_hline(y=50, line_dash='dash', line_color='#ccc',
+                             annotation_text='50% conv threshold')
+            fig_sc.update_layout(
+                height=280,
+                plot_bgcolor='#fafafa',
+                xaxis_title='Total Inquiries',
+                yaxis_title='Conversion Rate %',
+                margin=dict(t=10,b=30)
+            )
+            st.markdown("**Inquiry Volume vs Conversion Rate** (bubble = sales qty, color = fill rate)")
+            st.plotly_chart(fig_sc, use_container_width=True)
+
+        # ── Full table ──
+        st.markdown(f"**Showing {len(filtered)} items** (sorted by {sort_by})")
+        disp = filtered.reset_index()[['ItemCode','Material','Total_Inq','Total_SO','Total_Delivered',
+                                        'Conv_Rate','Fill_Rate','Lost_Demand']].copy()
+        if 'ABC_XYZ' in filtered.columns:
+            disp.insert(2, 'Class', filtered['ABC_XYZ'].reset_index(drop=True))
+        if 'Final_Action' in filtered.columns:
+            disp.insert(3, 'Decision', filtered['Final_Action'].reset_index(drop=True))
+        if 'StockoutMonth' in filtered.columns:
+            disp['Stockout'] = filtered['StockoutMonth'].reset_index(drop=True)
+
+        disp.columns = [c.replace('_',' ') for c in disp.columns]
+        for col in ['Total Inq','Total SO','Total Delivered','Lost Demand']:
+            if col in disp.columns:
+                disp[col] = disp[col].apply(lambda x: f'{int(x):,}')
+        if 'Conv Rate' in disp.columns:
+            disp['Conv Rate'] = disp['Conv Rate'].apply(lambda x: f'{x:.1f}%')
+        if 'Fill Rate' in disp.columns:
+            disp['Fill Rate'] = disp['Fill Rate'].apply(lambda x: f'{x:.1f}%')
+
+        def _color_conv(row):
+            val = row.get('Conv Rate','0%')
+            try:
+                v = float(str(val).replace('%',''))
+                if v < 10:   return ['background-color:#ffe5e5']*len(row)
+                if v < 25:   return ['background-color:#fff3cd']*len(row)
+                if v >= 50:  return ['background-color:#d4edda']*len(row)
+            except: pass
+            return ['']*len(row)
+
+        st.dataframe(
+            disp.set_index('ItemCode').style.apply(_color_conv, axis=1),
+            use_container_width=True, height=420
+        )
+        st.caption('🔴 Red < 10% conv · 🟡 Yellow 10–25% · 🟢 Green ≥ 50% · Lost Demand = Inquiries − Sales Orders')
+
+    # ── SECTION 3: Item drill-down ──
+    st.markdown("---")
+    st.markdown("#### 🔎 Item Trend — Year-by-Year Conversion")
+    st.caption("Track how conversion evolves for a specific item to detect stockout patterns")
+
+    all_items_conv = sorted(item_df[item_df['Total_Inq'] >= 10].index.tolist())
+    default_item = 'SS-T8-S-049-6ME' if 'SS-T8-S-049-6ME' in all_items_conv else all_items_conv[0]
+    sel_item = st.selectbox('Select item:', all_items_conv,
+                             index=all_items_conv.index(default_item), key='conv_item_sel')
+
+    if sel_item:
+        yr_item = []
+        for y in YEARS:
+            inq_y  = tq[(tq['Year']==y) & (tq['ItemCode']==sel_item)]['Quantity'].sum()
+            sale_y = so_raw[(so_raw['Year']==y) & (so_raw['ItemCode']==sel_item)]['Quantity'].sum()
+            del_y  = so_raw[(so_raw['Year']==y) & (so_raw['ItemCode']==sel_item)]['Delivered Qty'].sum()
+            conv_y = sale_y/inq_y*100 if inq_y>0 else 0
+            fill_y = del_y/sale_y*100 if sale_y>0 else 0
+            lost_y = max(0, inq_y - sale_y)
+            yr_item.append({'Year':str(y),'Inquiries':inq_y,'Sales Orders':sale_y,
+                            'Delivered':del_y,'Conv%':round(conv_y,1),
+                            'Fill%':round(fill_y,1),'Lost':lost_y})
+        yri_df = pd.DataFrame(yr_item)
+
+        # Row of metrics
+        total_inq  = yri_df['Inquiries'].sum()
+        total_so   = yri_df['Sales Orders'].sum()
+        total_del  = yri_df['Delivered'].sum()
+        avg_conv   = total_so/total_inq*100 if total_inq>0 else 0
+        avg_fill   = total_del/total_so*100 if total_so>0 else 0
+
+        k1,k2,k3,k4,k5 = st.columns(5)
+        with k1: st.metric("Total Inquiries",  f"{total_inq:,.0f}")
+        with k2: st.metric("Total SO Received",f"{total_so:,.0f}")
+        with k3: st.metric("Total Delivered",  f"{total_del:,.0f}")
+        with k4:
+            color = "normal" if avg_conv >= 25 else "inverse"
+            st.metric("Avg Conv Rate", f"{avg_conv:.1f}%")
+        with k5:
+            st.metric("Avg Fill Rate", f"{avg_fill:.1f}%")
+
+        # Trend chart
+        fig3 = go.Figure()
+        fig3.add_trace(go.Bar(
+            name='Inquiries', x=yri_df['Year'], y=yri_df['Inquiries'],
+            marker_color='#dee2e6', opacity=0.6,
+        ))
+        fig3.add_trace(go.Bar(
+            name='Sales Orders', x=yri_df['Year'], y=yri_df['Sales Orders'],
+            marker_color='#007bff',
+        ))
+        fig3.add_trace(go.Bar(
+            name='Delivered', x=yri_df['Year'], y=yri_df['Delivered'],
+            marker_color='#28a745',
+        ))
+        fig3.add_trace(go.Scatter(
+            name='Conv Rate %', x=yri_df['Year'], y=yri_df['Conv%'],
+            mode='lines+markers+text',
+            text=yri_df['Conv%'].apply(lambda x: f'{x:.1f}%' if x>0 else ''),
+            textposition='top center',
+            line=dict(color='#f0a500', width=2),
+            marker=dict(size=9), yaxis='y2'
+        ))
+        fig3.add_trace(go.Scatter(
+            name='Fill Rate %', x=yri_df['Year'], y=yri_df['Fill%'],
+            mode='lines+markers',
+            line=dict(color='#6f42c1', width=2, dash='dot'),
+            marker=dict(size=9, symbol='diamond'), yaxis='y2'
+        ))
+        max_y2 = max(yri_df['Conv%'].max(), yri_df['Fill%'].max(), 30) * 1.4
+        fig3.update_layout(
+            barmode='group', height=360,
+            plot_bgcolor='#fafafa',
+            title=f'{sel_item} — Inquiry → Sales → Delivery Trend',
+            yaxis=dict(title='Lengths'),
+            yaxis2=dict(title='Rate %', overlaying='y', side='right', range=[0, max_y2]),
+            legend=dict(orientation='h', yanchor='bottom', y=1.02),
+            margin=dict(b=20, t=60)
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+        # Interpretation
+        recent_conv = yri_df[yri_df['Conv%']>0]['Conv%'].iloc[-1] if len(yri_df[yri_df['Conv%']>0])>0 else 0
+        recent_fill = yri_df[yri_df['Fill%']>0]['Fill%'].iloc[-1] if len(yri_df[yri_df['Fill%']>0])>0 else 0
+
+        if avg_conv < 10 and total_inq > 1000:
+            insight = f"⚠️ Very low conversion ({avg_conv:.1f}%) despite high inquiry volume — likely stockout-driven lost demand. Check stock levels."
+            bg = '#fff3cd'
+        elif avg_conv < 25:
+            insight = f"📊 Moderate conversion ({avg_conv:.1f}%). Some demand going to competitors or exploratory inquiries. Monitor stock."
+            bg = '#e8f4ff'
+        elif avg_fill < 70:
+            insight = f"📦 Good conversion ({avg_conv:.1f}%) but low fill rate ({avg_fill:.1f}%) — stock being ordered but not delivered. Supplier or stock issue."
+            bg = '#fff3cd'
+        else:
+            insight = f"✅ Healthy conversion ({avg_conv:.1f}%) and fill rate ({avg_fill:.1f}%). Demand is well-served."
+            bg = '#d4edda'
+
+        st.markdown(f'<div style="background:{bg};border-radius:6px;padding:12px;font-size:13px">{insight}</div>',
+                    unsafe_allow_html=True)
+
+        # Year table
+        st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
+        tbl = yri_df.copy()
+        tbl['Inquiries']    = tbl['Inquiries'].apply(lambda x: f'{int(x):,}')
+        tbl['Sales Orders'] = tbl['Sales Orders'].apply(lambda x: f'{int(x):,}')
+        tbl['Delivered']    = tbl['Delivered'].apply(lambda x: f'{int(x):,}')
+        tbl['Lost']         = tbl['Lost'].apply(lambda x: f'{int(x):,}')
+        tbl['Conv%']        = tbl['Conv%'].apply(lambda x: f'{x:.1f}%')
+        tbl['Fill%']        = tbl['Fill%'].apply(lambda x: f'{x:.1f}%')
+        st.dataframe(tbl.set_index('Year'), use_container_width=True)
+
+
+
 
 
 
