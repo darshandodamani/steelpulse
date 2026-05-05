@@ -1563,9 +1563,12 @@ def _show_procurement_board(df):
         """
         st.markdown(matrix_html, unsafe_allow_html=True)
 
+    # ── Material group filter — must be defined before KPI calculation ──
+    mat_groups = ['All Materials', 'Stainless Steel', 'Exotic / Special Alloy', 'Copper', 'Tungsten']
+    selected_mat = st.selectbox('Filter by material group:', mat_groups, key='mat_group_filter')
+
     # ── KPIs ──
     board = _procurement_board_filter(df)
-    # Apply material group filter
     if selected_mat != 'All Materials' and 'MaterialGroup' in board.columns:
         board = board[board['MaterialGroup'] == selected_mat]
     if 'Final_Action' in board.columns:
@@ -1596,9 +1599,6 @@ def _show_procurement_board(df):
 
     # ── Filter ──
     # ── Material group filter ──
-    mat_groups = ['All Materials', 'Stainless Steel', 'Exotic / Special Alloy', 'Copper', 'Tungsten']
-    selected_mat = st.selectbox('Filter by material group:', mat_groups, key='mat_group_filter')
-
     # ── 12M / 24M toggle ──
     col_toggle, col_filter = st.columns([1, 4])
     with col_toggle:
@@ -3103,7 +3103,6 @@ def _show_conversion_analysis(result_df, uploaded_file):
         tbl['Conv%']        = tbl['Conv%'].apply(lambda x: f'{x:.1f}%')
         tbl['Fill%']        = tbl['Fill%'].apply(lambda x: f'{x:.1f}%')
         st.dataframe(tbl.set_index('Year'), use_container_width=True)
-
 
 
 
