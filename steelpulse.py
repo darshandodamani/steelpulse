@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║          Tubing Purchase Visulizer — Procurement Intelligence Platform          ║
+║          SteelPulse — Procurement Intelligence Platform          ║
 ║          Streamlit Single-File App  |  Version 2.0               ║
 ║                                                                  ║
 ║  ALGORITHM: Weighted Multi-Signal Procurement Scoring (WMSPS)   ║
@@ -89,7 +89,7 @@ def parse_excel(uploaded_file):
       - Tubing Purchase     → purchase data by item/date
       - Tubing Stock balance → current stock position per item
     Sheets NOT used: Sheet5 (manual), TP History (pivot), Purchase-Table (pivot),
-      Quotation-Table (pivot), SO-Table (pivot), Date
+      Quotation-Table (pivot), SO-Table (pivot), 144 PRICE, Date
     """
     import warnings
     warnings.filterwarnings("ignore")
@@ -390,7 +390,7 @@ def build_master(data):
     else:
         master['FillRate'] = np.nan
 
-    # ── Price per length (from ItemCost) ──
+    # ── Price per length (from ItemCost, no 144 PRICE sheet) ──
     master['PricePerLength'] = master['ItemCost'].clip(lower=0)
 
     # ── Lead time ──
@@ -945,7 +945,7 @@ def build_excel_export(df):
 
         # ── Sheet 1: Executive Summary ──
         ws = wb.add_worksheet("Executive Summary")
-        ws.write(0, 0, "🔩 Tubing Purchase Visualizer — Procurement Intelligence Report", title_fmt)
+        ws.write(0, 0, "🔩 SteelPulse — Procurement Intelligence Report", title_fmt)
         ws.write(1, 0, f"Generated: {datetime.now().strftime('%d %B %Y %H:%M')}")
         summary = compute_summary(df)
         kpi_data = [
@@ -1501,7 +1501,7 @@ def _procurement_board_filter(df):
 
 def _show_procurement_board(df):
     YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
-    st.markdown("#### 🛒 Tubing Purchase — ABC-XYZ + Decision Matrix")
+    st.markdown("#### 🎯 Procurement Board — ABC-XYZ + Decision Matrix")
 
     # ── Algorithm explanation ──
     with st.expander("📖 How this algorithm works — click to expand", expanded=False):
@@ -1563,11 +1563,6 @@ def _show_procurement_board(df):
         """
         st.markdown(matrix_html, unsafe_allow_html=True)
 
-    # ── Filter ──
-    # ── Material group filter ──
-    mat_groups = ['All Materials', 'Stainless Steel', 'Exotic / Special Alloy', 'Copper', 'Tungsten']
-    selected_mat = st.selectbox('Filter by material group:', mat_groups, key='mat_group_filter')
-
     # ── KPIs ──
     board = _procurement_board_filter(df)
     # Apply material group filter
@@ -1582,17 +1577,27 @@ def _show_procurement_board(df):
     else:
         pri_buy = buy = review = monitor = limit = pd.DataFrame()
 
-    k1,k2,k3,k4,k5,k6 = st.columns(6)
+    k1,k2,k3,k4,k5,k6,k7 = st.columns(7)
+    pri_qty = int(pri_buy.ProposedQty_6M.sum()) if not pri_buy.empty and 'ProposedQty_6M' in pri_buy.columns else 0
+    all_qty = int(buy.ProposedQty_6M.sum())     if not buy.empty     and 'ProposedQty_6M' in buy.columns     else 0
     with k1: st.metric("🔥 BUY (Priority)", len(pri_buy), help="AX items — never allow stockout")
     with k2: st.metric("🟢 All BUY signals", len(buy),    help="All items needing procurement")
     with k3: st.metric("👁️ Review",          len(review),  help="Monitor closely before buying")
     with k4: st.metric("🔵 Monitor",         len(monitor), help="Watch only, no immediate action")
     with k5: st.metric("⚖️ Limit/Minimal",   len(limit),   help="Controlled buying only")
     with k6:
-        total_qty = int(buy.ProposedQty_6M.sum()) if not buy.empty and 'ProposedQty_6M' in buy.columns else 0
-        st.metric("Proposed Qty", f"{total_qty:,}", help="Total lengths to procure")
+        st.metric("🔥 Priority Qty", f"{pri_qty:,}",
+                  help="Proposed buy for BUY PRIORITY items only (AX class)")
+    with k7:
+        st.metric("🟢 All BUY Qty", f"{all_qty:,}",
+                  help="Proposed buy for ALL BUY signal items combined")
 
     st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
+
+    # ── Filter ──
+    # ── Material group filter ──
+    mat_groups = ['All Materials', 'Stainless Steel', 'Exotic / Special Alloy', 'Copper', 'Tungsten']
+    selected_mat = st.selectbox('Filter by material group:', mat_groups, key='mat_group_filter')
 
     # ── 12M / 24M toggle ──
     col_toggle, col_filter = st.columns([1, 4])
@@ -1881,9 +1886,11 @@ def _show_procurement_board(df):
     # ── Item detail ──
     st.markdown("---")
     st.markdown("#### 🔍 Item Detail")
-    all_items = show_df['ItemCode'].tolist() if not show_df.empty else []
+    all_items = show_df['ItemCode'].sort_values().tolist() if not show_df.empty else []
     if all_items:
-        selected = st.selectbox("Select item to inspect:", all_items, key="board_item_select")
+        selected = st.selectbox("Select item to inspect:", all_items,
+                                key="board_item_select",
+                                help="Search by typing item code")
         if selected:
             irow = df[df.ItemCode == selected].iloc[0]
             _show_board_item_detail(irow, YEARS)
@@ -2103,55 +2110,14 @@ def _show_board_item_detail(row, YEARS):
     """, unsafe_allow_html=True)
 
 
-def show_login():
-    """Display the login page."""
-    st.markdown("""
-    <div style="background:#1A1A2E;padding:40px;border-radius:12px;margin-top:60px;text-align:center">
-        <div style="font-size:40px;margin-bottom:10px"> </div>
-        <div style="font-size:28px;font-weight:800;color:#fff;margin-bottom:30px">
-            Tubing Purchase Visulizer
-        </div>
-        <div style="color:#888;font-size:14px">Procurement Intelligence Platform</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("<div style='margin:30px 0'></div>", unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.markdown("<h3 style='text-align:center'>Login</h3>", unsafe_allow_html=True)
-        username = st.text_input("Username", placeholder="Please enter your username")
-        password = st.text_input("Password", type="password", placeholder="Please enter your password")
-        
-        st.markdown("<div style='margin:20px 0'></div>", unsafe_allow_html=True)
-        
-        if st.button("🔓 Login", use_container_width=True):
-            # Verify credentials
-            if username == "dwaraka" and password == "dwaraka123":
-                st.session_state.authenticated = True
-                st.success("✅ Login successful!")
-                st.rerun()
-            else:
-                st.error("❌ Invalid username or password")
-
-
 def main():
+    init_db()   # ensure SQLite tables exist
     st.set_page_config(
-        page_title="Tubing Purchase Visulizer — Procurement Intelligence",
+        page_title="SteelPulse — Procurement Intelligence",
         page_icon="🔩",
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    
-    init_db()   # ensure SQLite tables exist
-    
-    # Check authentication
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-    
-    if not st.session_state.authenticated:
-        show_login()
-        return
 
     # ── Global CSS ──
     st.markdown("""
@@ -2167,26 +2133,19 @@ def main():
     """, unsafe_allow_html=True)
 
     # ── Header ──
-    header_col1, header_col2, header_col3 = st.columns([8, 1, 1])
-    with header_col1:
-        st.markdown("""
-        <div style="background:#1A1A2E;padding:32px 24px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
-          <span style="font-size:28px;font-weight:800;color:#fff"> Tubing <span style="color:#f0a500"> Purchase</span></span>
-          <span style="color:#555;font-size:13px">| Procurement Intelligence Platform</span>
-          <span style="margin-left:auto;color:#888;font-size:11px">WMSPS Algorithm + TWMAP 6-Month Forecast</span>
-        </div>
-        """, unsafe_allow_html=True)
-    with header_col3:
-        st.markdown("<div style='margin-top:3px'></div>", unsafe_allow_html=True)
-        if st.button(" Logout", key="logout_btn", use_container_width=True):
-            st.session_state.authenticated = False
-            st.rerun()
+    st.markdown("""
+    <div style="background:#1A1A2E;padding:16px 24px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
+      <span style="font-size:28px;font-weight:800;color:#fff">🔩 Steel<span style="color:#f0a500">Pulse</span></span>
+      <span style="color:#555;font-size:13px">| Procurement Intelligence Platform</span>
+      <span style="margin-left:auto;color:#888;font-size:11px">WMSPS Algorithm + TWMAP 6-Month Forecast</span>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ─────────────────────────────────
     # SIDEBAR
     # ─────────────────────────────────
     with st.sidebar:
-        st.markdown("###  Upload SAP Export")
+        st.markdown("### 📁 Upload SAP Export")
         uploaded = st.file_uploader(
             "Drop your .xlsx file here",
             type=["xlsx","xls"],
@@ -2194,15 +2153,15 @@ def main():
         )
 
         st.markdown("---")
-        st.markdown("###  Filters")
+        st.markdown("### 🔍 Filters")
         filter_signal = st.multiselect("Signal", ["BUY","WATCH","HOLD","SKIP"], default=[])
         filter_class  = st.multiselect("Item Class", ["FAST_MOVER","SLOW_MOVER","PROJECT","DEAD"], default=[])
-        filter_risk   = st.checkbox("Stockout Risk Only", value=False)
+        filter_risk   = st.checkbox("⚠️ Stockout Risk Only", value=False)
         search_term   = st.text_input("Search Item Code", placeholder="e.g. SS-T8-S-065")
 
         st.markdown("---")
-        st.markdown("### Required Sheets")
-        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance"]:
+        st.markdown("### 📖 Required Sheets")
+        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance","144 PRICE"]:
             st.markdown(f"- `{s}`")
 
         st.markdown("---")
@@ -2220,7 +2179,7 @@ def main():
     if uploaded is None:
         st.markdown("""
         <div style="text-align:center;padding:80px 20px;background:#111318;border-radius:12px;border:2px dashed #444">
-          <div style="font-size:60px;margin-bottom:16px"> </div>
+          <div style="font-size:60px;margin-bottom:16px">🔩</div>
           <div style="font-size:24px;font-weight:700;color:#ffffff;margin-bottom:8px">Upload your SAP Excel export to begin</div>
           <div style="font-size:14px;color:#aaa">Drag and drop your .xlsx file in the sidebar<br>
           The algorithm will process all sheets automatically</div>
@@ -2241,13 +2200,13 @@ def main():
         return
 
     # ── Run analysis ──
-    with st.spinner(" Running WMSPS algorithm + TWMAP 6-month forecast..."):
+    with st.spinner("⚙️ Running WMSPS algorithm + TWMAP 6-month forecast..."):
         try:
             file_bytes = uploaded.read()
             df = run_full_analysis(file_bytes, uploaded.name)
         except Exception as e:
-            st.error(f" Error processing file: {str(e)}")
-            st.info(" Make sure your file contains: Quotation-Table, SO-Table/TSO Table, Purchase-Table/TP History, and Tubing Stock balance sheets.")
+            st.error(f"❌ Error processing file: {str(e)}")
+            st.info("💡 Make sure your file contains: Quotation-Table, SO-Table/TSO Table, Purchase-Table/TP History, Tubing Stock balance, and 144 PRICE sheets.")
             st.stop()
 
     summary = compute_summary(df)
@@ -2281,7 +2240,7 @@ def main():
         st.download_button(
             label="⬇️ Export Excel Report",
             data=excel_buf,
-            file_name=f"Tubing_Purchase_Visulizer_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            file_name=f"SteelPulse_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
         )
@@ -2309,7 +2268,7 @@ def main():
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📈 Forecast & Buy Signals",
         "📅 6-Month Projection",
-        "🛒 Tubing Purchase",
+        "🎯 Procurement Board",
         "🔄 Conversion Intelligence",
         "📊 Analytics",
         "📋 Balance Sheet",
@@ -2380,9 +2339,14 @@ def main():
         # ── Item detail expander ──
         st.markdown("---")
         st.markdown("#### 🔎 Item Deep Dive")
-        item_list = filtered[filtered.Signal.isin(["BUY","WATCH"])]["ItemCode"].tolist()
+        # Include all items: with sales, stock, or incoming PO (catches -NOR items)
+        item_list = filtered[
+            (filtered.TotalSales > 0) |
+            (filtered.NetAvailStock > 0) |
+            (filtered.IncomingPO > 0)
+        ]["ItemCode"].sort_values().tolist()
         if not item_list:
-            item_list = filtered["ItemCode"].tolist()
+            item_list = filtered["ItemCode"].sort_values().tolist()
 
         if item_list:
             selected = st.selectbox("Select an item to inspect:", item_list)
@@ -2455,7 +2419,7 @@ def main():
         st.markdown("---")
         st.markdown("#### 🔍 Per-Item 6-Month Forecast")
         item_sel2 = st.selectbox(
-            "Select item:", df[df.TotalSales > 0]["ItemCode"].tolist(), key="fc_item"
+            "Select item:", df[(df.TotalSales > 0) | (df.NetAvailStock > 0) | (df.IncomingPO > 0)]["ItemCode"].sort_values().tolist(), key="fc_item"
         )
         if item_sel2:
             irow2 = df[df.ItemCode == item_sel2].iloc[0]
@@ -2463,7 +2427,7 @@ def main():
 
 
     # ══════════════════════════════════════════════════════════════
-    # TAB 3 — TUBING PURCHASE
+    # TAB 3 — PROCUREMENT BOARD
     # ══════════════════════════════════════════════════════════════
     with tab3:
         _show_procurement_board(df)
@@ -2565,7 +2529,7 @@ def main():
     # ══════════════════════════════════════════════════════════════
     # TAB 6 — BALANCE SHEET
     # ══════════════════════════════════════════════════════════════
-    with tab6:
+    with tab5:
         st.markdown("#### 📋 Year-wise Balance Sheet — Inquiry vs Sales vs Purchase")
 
         balance_rows = []
@@ -2629,7 +2593,7 @@ def main():
     # ══════════════════════════════════════════════════════════════
     # TAB 7 — LEARNING DASHBOARD
     # ══════════════════════════════════════════════════════════════
-    with tab7:
+    with tab6:
         _show_learning_dashboard(df)
 
     # ══════════════════════════════════════════════════════════════
@@ -2756,7 +2720,7 @@ def _show_conversion_analysis(result_df, uploaded_file):
 
     st.markdown("""
     <div style="background:#1A1A2E;border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:12px;color:#ccc">
-    <div style="color:#f0a500;font-weight:700;margin-bottom:8px">📖 What this tab shows and where each metric appears in Tubing Purchase Visulizer</div>
+    <div style="color:#f0a500;font-weight:700;margin-bottom:8px">📖 What this tab shows and where each metric appears in SteelPulse</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div>
         <b style="color:#fff">🔄 Inquiry → Sales Conversion Rate</b><br>
@@ -3139,7 +3103,6 @@ def _show_conversion_analysis(result_df, uploaded_file):
         tbl['Conv%']        = tbl['Conv%'].apply(lambda x: f'{x:.1f}%')
         tbl['Fill%']        = tbl['Fill%'].apply(lambda x: f'{x:.1f}%')
         st.dataframe(tbl.set_index('Year'), use_container_width=True)
-
 
 
 
