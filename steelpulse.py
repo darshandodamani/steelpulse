@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║          SteelPulse — Procurement Intelligence Platform          ║
+║          Tubing Purchase Visulizer — Procurement Intelligence Platform          ║
 ║          Streamlit Single-File App  |  Version 2.0               ║
 ║                                                                  ║
 ║  ALGORITHM: Weighted Multi-Signal Procurement Scoring (WMSPS)   ║
@@ -902,7 +902,7 @@ def compute_summary(df):
         "slow":  int((df.ItemClass=="SLOW_MOVER").sum()),
         "project": int((df.ItemClass=="PROJECT").sum()),
         "stockout_risk": int(df.HasStockoutRisk.sum()),
-        "proposed_qty":  int(df.ProposedQty_6M.sum()),
+        "proposed_qty":  int(df[df.Signal.isin(["BUY","WATCH"])].ProposedQty_6M.sum()),
         "est_cost_usd":  round(float(df.EstCostUSD.sum()), 2),
         "annual": {
             yr: {
@@ -1035,18 +1035,33 @@ def build_excel_export(df):
         ws3.set_column(7+len(MONTH_LABELS)*3, 7+len(MONTH_LABELS)*3+4, 14)
 
         # ── Sheet 4: Full Analysis ──
-        yr_cols = []
-        for yr in YEARS: yr_cols += [f"Inq {yr}", f"Sales {yr}", f"Purch {yr}"]
-        hdrs4 = ["Item Code","Class","Signal","Score","Total Inq","Total Sales",
-                 "Total Purch","Avg Monthly Sales","QOH","Open SO","Avail Stock",
-                 "Incoming PO","Net Avail","Cover Days","Lead Wks",
-                 "Proposed Qty","Est Cost USD","Stockout Month"] + yr_cols
-        df_out = df.sort_values("Score", ascending=False)
-        df_out.to_excel(writer, sheet_name="Full Analysis", index=False,
-                        startrow=1, header=False)
-        ws4 = writer.sheets["Full Analysis"]
+        # Full Analysis — explicit column selection to prevent misaligned headers
+        yr_cols_data = []
+        for yr in YEARS: yr_cols_data += [f"Inq_{yr}", f"Sales_{yr}", f"Purch_{yr}"]
+        full_cols = ["ItemCode","ItemClass","Signal","Score","TotalInquiry","TotalSales",
+                     "TotalPurchase","AvgMonthlySales","QOH","OpenSO","AvailStock",
+                     "IncomingPO","NetAvailStock","StockCoverDays","LeadTimeWeeks",
+                     "ProposedQty_6M","EstCostUSD","StockoutMonth"] + yr_cols_data
+        full_hdrs = ["Item Code","Class","Signal","Score","Total Inq","Total Sales",
+                     "Total Purch","Avg Monthly Sales","QOH","Open SO","Avail Stock",
+                     "Incoming PO","Net Avail","Cover Days","Lead Wks",
+                     "Proposed Qty","Est Cost USD","Stockout Month"] + [
+                     f"Inq {yr}" if i%3==0 else f"Sales {yr}" if i%3==1 else f"Purch {yr}"
+                     for yr in YEARS for i in range(3)]
+        avail_fc = [c for c in full_cols if c in df.columns]
+        df_out = df[avail_fc].sort_values("Score", ascending=False)
+        ws4 = wb.add_worksheet("Full Analysis")
         ws4.write(0, 0, "📋 Full Item Analysis — All Items", title_fmt)
-        for ci, h in enumerate(hdrs4): ws4.write(1, ci, h, hdr_fmt)
+        for ci, h in enumerate(full_hdrs[:len(avail_fc)]): ws4.write(1, ci, h, hdr_fmt)
+        ws4.freeze_panes(2, 0)
+        ws4.autofilter(1, 0, 1, len(avail_fc)-1)
+        for ri, (_, row) in enumerate(df_out.iterrows(), 2):
+            for ci, col in enumerate(avail_fc):
+                v = row.get(col, "")
+                if isinstance(v, float) and math.isnan(v): v = 0
+                ws4.write(ri, ci, v, cell_fmt)
+        ws4.set_column(0, 0, 26)
+        ws4.set_column(1, len(avail_fc), 12)
 
         # ── Sheet 5: Balance Sheet ──
         ws5 = wb.add_worksheet("Year Balance")
@@ -1501,7 +1516,7 @@ def _procurement_board_filter(df):
 
 def _show_procurement_board(df):
     YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
-    st.markdown("#### 🎯 Procurement Board — ABC-XYZ + Decision Matrix")
+    st.markdown("#### 🛒 Tubing Purchase — ABC-XYZ + Decision Matrix")
 
     # ── Algorithm explanation ──
     with st.expander("📖 How this algorithm works — click to expand", expanded=False):
@@ -2110,14 +2125,53 @@ def _show_board_item_detail(row, YEARS):
     """, unsafe_allow_html=True)
 
 
+def show_login():
+    """Display the login page."""
+    st.markdown("""
+    <div style="background:#1A1A2E;padding:40px;border-radius:12px;margin-top:60px;text-align:center">
+        <div style="font-size:40px;margin-bottom:10px">🔩</div>
+        <div style="font-size:28px;font-weight:800;color:#fff;margin-bottom:30px">
+            Tubing Purchase Visulizer
+        </div>
+        <div style="color:#888;font-size:14px">Procurement Intelligence Platform</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div style='margin:30px 0'></div>", unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("<h3 style='text-align:center'>Login</h3>", unsafe_allow_html=True)
+        username = st.text_input("Username", placeholder="Please enter your username")
+        password = st.text_input("Password", type="password", placeholder="Please enter your password")
+
+        st.markdown("<div style='margin:20px 0'></div>", unsafe_allow_html=True)
+
+        if st.button("🔓 Login", use_container_width=True):
+            if username == "dwaraka" and password == "dwaraka123":
+                st.session_state.authenticated = True
+                st.success("✅ Login successful!")
+                st.rerun()
+            else:
+                st.error("❌ Invalid username or password")
+
+
 def main():
-    init_db()   # ensure SQLite tables exist
     st.set_page_config(
-        page_title="SteelPulse — Procurement Intelligence",
+        page_title="Tubing Purchase Visulizer — Procurement Intelligence",
         page_icon="🔩",
         layout="wide",
         initial_sidebar_state="expanded",
     )
+
+    init_db()   # ensure SQLite tables exist
+
+    # ── Authentication ──
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if not st.session_state.authenticated:
+        show_login()
+        return
 
     # ── Global CSS ──
     st.markdown("""
@@ -2133,13 +2187,20 @@ def main():
     """, unsafe_allow_html=True)
 
     # ── Header ──
-    st.markdown("""
+    header_col1, _hc2, header_col3 = st.columns([8, 1, 1])
+    with header_col1:
+        st.markdown("""
     <div style="background:#1A1A2E;padding:16px 24px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
-      <span style="font-size:28px;font-weight:800;color:#fff">🔩 Steel<span style="color:#f0a500">Pulse</span></span>
+      <span style="font-size:28px;font-weight:800;color:#fff">🔩 Tubing <span style="color:#f0a500">Purchase</span></span>
       <span style="color:#555;font-size:13px">| Procurement Intelligence Platform</span>
       <span style="margin-left:auto;color:#888;font-size:11px">WMSPS Algorithm + TWMAP 6-Month Forecast</span>
     </div>
     """, unsafe_allow_html=True)
+    with header_col3:
+        st.markdown("<div style='margin-top:3px'></div>", unsafe_allow_html=True)
+        if st.button("🔓 Logout", key="logout_btn", use_container_width=True):
+            st.session_state.authenticated = False
+            st.rerun()
 
     # ─────────────────────────────────
     # SIDEBAR
@@ -2161,7 +2222,7 @@ def main():
 
         st.markdown("---")
         st.markdown("### 📖 Required Sheets")
-        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance","144 PRICE"]:
+        for s in ["Quotation-Table","SO-Table / TSO Table","Purchase-Table / TP History","Tubing Stock balance"]:
             st.markdown(f"- `{s}`")
 
         st.markdown("---")
@@ -2268,7 +2329,7 @@ def main():
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📈 Forecast & Buy Signals",
         "📅 6-Month Projection",
-        "🎯 Procurement Board",
+        "🛒 Tubing Purchase",
         "🔄 Conversion Intelligence",
         "📊 Analytics",
         "📋 Balance Sheet",
@@ -2726,7 +2787,7 @@ def _show_conversion_analysis(result_df, uploaded_file):
         <b style="color:#fff">🔄 Inquiry → Sales Conversion Rate</b><br>
         How many of the customer inquiries (quotations) become real Sales Orders.
         <b>Low conversion = lost demand</b> — either to stockouts, pricing, or competitors.<br>
-        <i>Used in: Procurement Board (PO Signal), Algorithm (S2 score), Decision Matrix (PO High/Low)</i>
+        <i>Used in: Tubing Purchase tab (PO Signal), Algorithm (S2 score), Decision Matrix (PO High/Low)</i>
       </div>
       <div>
         <b style="color:#fff">📦 Order Fill Rate</b><br>
