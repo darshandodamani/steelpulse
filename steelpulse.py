@@ -1589,26 +1589,20 @@ def _show_procurement_board(df):
     if 'Final_Action' in board.columns:
         pri_buy  = board[board.Final_Action=='BUY (PRIORITY)']
         buy      = board[board.Final_Action.isin(['BUY','BUY (PRIORITY)','MONITOR / BUY','BUY (CONTROLLED)','REVIEW / BUY'])]
-        review   = board[board.Final_Action.isin(['REVIEW CLOSELY','REVIEW','REVIEW OCCASIONALLY','REVIEW / BUY'])]
-        monitor  = board[board.Final_Action.isin(['MONITOR','MONITOR / BUY'])]
-        limit    = board[board.Final_Action.isin(['LIMIT BUY','HOLD / MINIMAL'])]
     else:
-        pri_buy = buy = review = monitor = limit = pd.DataFrame()
+        pri_buy = buy = pd.DataFrame()
 
-    k1,k2,k3,k4,k5,k6,k7 = st.columns(7)
+    k1,k2,k3,k4 = st.columns(4)
     pri_qty = int(pri_buy.ProposedQty_6M.sum()) if not pri_buy.empty and 'ProposedQty_6M' in pri_buy.columns else 0
     all_qty = int(buy.ProposedQty_6M.sum())     if not buy.empty     and 'ProposedQty_6M' in buy.columns     else 0
-    with k1: st.metric("🔥 BUY (Priority)", len(pri_buy), help="AX items — never allow stockout")
-    with k2: st.metric("🟢 All BUY signals", len(buy),    help="All items needing procurement")
-    with k3: st.metric("👁️ Review",          len(review),  help="Monitor closely before buying")
-    with k4: st.metric("🔵 Monitor",         len(monitor), help="Watch only, no immediate action")
-    with k5: st.metric("⚖️ Limit/Minimal",   len(limit),   help="Controlled buying only")
-    with k6:
-        st.metric("🔥 Priority Qty", f"{pri_qty:,}",
-                  help="Proposed buy for BUY PRIORITY items only (AX class)")
-    with k7:
-        st.metric("🟢 All BUY Qty", f"{all_qty:,}",
-                  help="Proposed buy for ALL BUY signal items combined")
+    with k1:
+        st.metric("🔥 BUY (Priority)", len(pri_buy), help="High-value AX items that should be reviewed for purchase first")
+    with k2:
+        st.metric("🟢 All BUY", len(buy), help="All items needing procurement")
+    with k3:
+        st.metric("🔥 Priority Qty", f"{pri_qty:,}", help="Proposed buy for BUY (Priority) items only")
+    with k4:
+        st.metric("🟢 All BUY Qty", f"{all_qty:,}", help="Proposed buy for all BUY items combined")
 
     st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
 
@@ -1631,14 +1625,11 @@ def _show_procurement_board(df):
     with col_filter:
         view_opt = st.radio(
             "Filter by action:",
-            ["🔥 BUY Priority (AX)", "🟢 All BUY", "👁️ Review", "🔵 Monitor", "⚖️ Limit/Control", "📋 All Actionable"],
+            ["🔥 BUY Priority (AX)", "🟢 All BUY", "📋 All Actionable"],
             horizontal=True, key="abc_filter"
         )
     if "Priority" in view_opt:   show_df = pri_buy
     elif "All BUY" in view_opt:  show_df = buy
-    elif "Review"  in view_opt:  show_df = review
-    elif "Monitor" in view_opt:  show_df = monitor
-    elif "Limit"   in view_opt:  show_df = limit
     else:                         show_df = board
 
     if show_df.empty:
@@ -1722,7 +1713,7 @@ def _show_procurement_board(df):
     )
     st.caption(
         f"Showing {len(show_df)} items  |  "
-        f"🟢 Green=BUY  🔵 Blue=Monitor  🟣 Purple=Review  🟠 Orange=Limit  🔴 Red=Zero stock  |  "
+        f"🟢 Green=BUY (Priority) / BUY  🔴 Red=Zero stock  |  "
         f"Net Stock = QOH + Incoming PO - Open SO"
     )
 
@@ -2311,15 +2302,8 @@ def main():
     # ─────────────────────────────────
     # KPI ROW
     # ─────────────────────────────────
-    c1,c2,c3,c4,c5,c6,c7,c8 = st.columns(8)
+    c1 = st.columns(1)[0]
     with c1: st.metric("Total Items",   f"{summary['total']:,}")
-    with c2: st.metric("🟢 BUY",         summary['buy'],    help="Order immediately")
-    with c3: st.metric("🔵 WATCH",       summary['watch'],  help="Prepare to order")
-    with c4: st.metric("🟡 HOLD",        summary['hold'],   help="Monitor monthly")
-    with c5: st.metric("⛔ SKIP",        summary['skip'],   help="Do not order")
-    with c6: st.metric("⚠️ Stockout Risk", summary['stockout_risk'], help="Stock runs out within 6 months")
-    with c7: st.metric("🛒 Proposed Qty", f"{summary['proposed_qty']:,}", help="Lengths to buy (6M cover)")
-    with c8: st.metric("💵 Est. Cost",   f"${summary['est_cost_usd']/1000:.0f}K", help="USD (priced items only)")
 
     st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
 
