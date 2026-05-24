@@ -1586,6 +1586,13 @@ def _show_procurement_board(df):
     board = _procurement_board_filter(df)
     if selected_mat != 'All Materials' and 'MaterialGroup' in board.columns:
         board = board[board['MaterialGroup'] == selected_mat]
+    st.markdown(
+        "<div style='background:#f8f9fa;border:1px solid #e5e5e5;border-radius:8px;padding:10px 12px;margin-bottom:8px;font-size:13px;'>"
+        "<b>BUY (Priority)</b> = AX items that should be checked first because they are high-value and highest urgency. "
+        "<b>All BUY</b> = every item currently marked for procurement, including Priority items plus other buy candidates."
+        "</div>",
+        unsafe_allow_html=True,
+    )
     if 'Final_Action' in board.columns:
         pri_buy  = board[board.Final_Action=='BUY (PRIORITY)']
         buy      = board[board.Final_Action.isin(['BUY','BUY (PRIORITY)','MONITOR / BUY','BUY (CONTROLLED)','REVIEW / BUY'])]
@@ -2335,6 +2342,52 @@ def main():
         open_so_risk = df[(df.OpenSO > df.AvailStock) & (df.TotalSales > 0)]
         if len(open_so_risk) > 0:
             st.warning(f"🟠 **{len(open_so_risk)} items** have Open SO exceeding Available Stock — customer deliveries at risk")
+
+        st.markdown("#### ⚠️ Risk Explorer")
+        risk_choice = st.radio(
+            "Show risk group:",
+            [
+                f"🔴 Stockout in next 2 months ({len(critical)})",
+                f"🟠 Open SO > Available Stock ({len(open_so_risk)})",
+                f"📦 Both risk groups ({len(pd.concat([critical, open_so_risk]).drop_duplicates(subset=['ItemCode']))})",
+            ],
+            horizontal=True,
+            key="risk_explorer_choice",
+        )
+        if "Stockout" in risk_choice:
+            risk_view = critical.copy()
+        elif "Open SO" in risk_choice:
+            risk_view = open_so_risk.copy()
+        else:
+            risk_view = pd.concat([critical, open_so_risk]).drop_duplicates(subset=["ItemCode"]).copy()
+
+        if len(risk_view) > 0:
+            risk_cols = [
+                "ItemCode", "Signal", "ItemClass", "StockoutMonth", "NetStock_Now",
+                "OpenSO", "AvailStock", "ProposedQty_6M", "EstCostUSD"
+            ]
+            risk_cols = [c for c in risk_cols if c in risk_view.columns]
+            risk_tbl = risk_view[risk_cols].copy()
+            risk_rename = {
+                "ItemCode": "Item Code",
+                "Signal": "Signal",
+                "ItemClass": "Class",
+                "StockoutMonth": "Stockout In",
+                "NetStock_Now": "Net Stock",
+                "OpenSO": "Open SO",
+                "AvailStock": "Available Stock",
+                "ProposedQty_6M": "Proposed Buy",
+                "EstCostUSD": "Est Cost (USD)",
+            }
+            risk_tbl = risk_tbl.rename(columns={k: v for k, v in risk_rename.items() if k in risk_tbl.columns})
+            if "Est Cost (USD)" in risk_tbl.columns:
+                risk_tbl["Est Cost (USD)"] = risk_tbl["Est Cost (USD)"].apply(lambda x: f"${x:,.0f}" if x > 0 else "—")
+            sort_cols = [c for c in ["Stockout In", "Open SO"] if c in risk_tbl.columns]
+            if sort_cols:
+                risk_tbl = risk_tbl.sort_values(sort_cols, ascending=True)
+            st.dataframe(risk_tbl, use_container_width=True, height=320)
+        else:
+            st.info("No items in the selected risk group.")
 
         # Build display table
         display_cols = {
