@@ -2045,23 +2045,23 @@ def _show_board_item_detail(row, YEARS):
         pur  = float(row.get(f'Purch_{y}',  0))
         conv = round(sal / inq * 100, 1) if inq > 0 else 0
         yr_rows.append({
-            'Year':              y,
-            'Inquiries':         int(inq),
-            'Sales (consumed)':  int(sal),
-            'Purchased':         int(pur),
-            'Conversion %':      conv,
-            'Inq ≥ 100?':       '✅ Yes' if inq >= 100 else '❌ No',
-            'Has Sales?':        '✅ Yes' if sal > 0 else '—',
+            'Year':                      y,
+            'Inquiries (lengths)':       int(inq),
+            'Sales (consumed) (lengths)':int(sal),
+            'Purchased (lengths)':       int(pur),
+            'Conversion %':              conv,
+            'Inq ≥ 100?':               '✅ Yes' if inq >= 100 else '❌ No',
+            'Has Sales?':                '✅ Yes' if sal > 0 else '—',
         })
 
     yr_df = pd.DataFrame(yr_rows).set_index('Year')
 
     def _color_yr(col):
-        if col.name == 'Inquiries':
+        if col.name == 'Inquiries (lengths)':
             return ['background-color:#d4edda' if v >= 100
                     else 'background-color:#fff3cd' if v > 0
                     else '' for v in col]
-        if col.name == 'Sales (consumed)':
+        if col.name == 'Sales (consumed) (lengths)':
             return ['background-color:#d4edda' if v > 0 else '' for v in col]
         return ['' for _ in col]
 
