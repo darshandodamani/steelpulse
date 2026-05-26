@@ -974,22 +974,22 @@ def build_excel_export(df):
         ws2 = wb.add_worksheet("Buy List")
         ws2.write(0, 0, "🛒 Procurement Buy List", title_fmt)
         hdrs2 = ["Item Code","Class","Signal","Score","S1 Vel","S2 Conv","S3 Cov","S4 SO",
-                 "Net Stock","Open SO","Avail","Incoming PO","Proposed Qty (6M)",
-                 "6M Demand Mid","Stockout Month","Lead Wks","Price/Len","Est Cost USD","Origin"]
+             "Net Stock","Open SO","Avail","Incoming PO","Proposed Qty (6M)",
+             "Stockout Month","Lead Wks","Price/Len","Est Cost USD","Origin"]
         write_headers(ws2, hdrs2, row=1)
         ws2.freeze_panes(2, 0)
         ws2.autofilter(1, 0, 1, len(hdrs2)-1)
         cols2 = ["ItemCode","ItemClass","Signal","Score","S1_Velocity","S2_Conversion",
-                 "S3_Coverage","S4_OpenSO","NetStock_Now","OpenSO","AvailStock","IncomingPO",
-                 "ProposedQty_6M","F6M_Mid","StockoutMonth","LeadTimeWeeks",
-                 "PricePerLength","EstCostUSD","Origin"]
+             "S3_Coverage","S4_OpenSO","NetStock_Now","OpenSO","AvailStock","IncomingPO",
+             "ProposedQty_6M","StockoutMonth","LeadTimeWeeks",
+             "PricePerLength","EstCostUSD","Origin"]
         for ri, (_, row) in enumerate(buy_df.iterrows(), 2):
             for ci, col in enumerate(cols2):
                 v = row.get(col, "")
                 if isinstance(v, float) and math.isnan(v): v = 0
                 fmt = sig_fmt(str(v)) if col == "Signal" else (money_fmt if col == "EstCostUSD" else cell_fmt)
                 ws2.write(ri, ci, v, fmt)
-        col2_widths = [24,14,9,8,8,8,8,8,11,10,10,13,16,14,13,10,12,14,12]
+        col2_widths = [24,14,9,8,8,8,8,8,11,10,10,13,16,13,10,12,14,12]
         for i, w in enumerate(col2_widths): ws2.set_column(i, i, w)
 
         # ── Sheet 3: 6-Month Forecast ──
@@ -1124,17 +1124,16 @@ def _show_item_detail(row):
           <div style="font-size:22px;font-weight:800;color:#155724">{proposed:,} lengths</div>
           <div style="font-size:11px;color:#888">${row.EstCostUSD:,.0f} USD</div>
         </div>""", unsafe_allow_html=True)
-    with c4:
-        stkout = str(row.StockoutMonth)
-        bg = "#ffe5e5" if stkout != "None" else "#d4edda"
-        fg = "#cc0000" if stkout != "None" else "#155724"
-        msg = f"Stockout: {stkout}" if stkout != "None" else "No Stockout Risk"
-        st.markdown(f"""
-        <div style="background:{bg};border-radius:8px;padding:12px;text-align:center">
-          <div style="font-size:10px;color:#888;text-transform:uppercase">Stockout Risk</div>
-          <div style="font-size:16px;font-weight:700;color:{fg}">{msg}</div>
-          <div style="font-size:11px;color:#888">6M Demand: {row.F6M_Mid:.1f} lengths</div>
-        </div>""", unsafe_allow_html=True)
+        with c4:
+                stkout = str(row.StockoutMonth)
+                bg = "#ffe5e5" if stkout != "None" else "#d4edda"
+                fg = "#cc0000" if stkout != "None" else "#155724"
+                msg = f"Stockout: {stkout}" if stkout != "None" else "No Stockout Risk"
+                st.markdown(f"""
+                <div style="background:{bg};border-radius:8px;padding:12px;text-align:center">
+                    <div style="font-size:10px;color:#888;text-transform:uppercase">Stockout Risk</div>
+                    <div style="font-size:16px;font-weight:700;color:{fg}">{msg}</div>
+                </div>""", unsafe_allow_html=True)
 
     st.markdown("<div style='margin:8px 0'></div>", unsafe_allow_html=True)
 
