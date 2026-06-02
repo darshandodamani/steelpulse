@@ -43,10 +43,19 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────────
-YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
-YEAR_WEIGHTS = {2021: 0.40, 2022: 0.55, 2023: 0.70,
-                2024: 1.00, 2025: 1.50, 2026: 2.00}
-MONTHS_2026 = 4   # Jan–Apr complete as of May 2026
+# ── Dynamic year/weight config (auto-set from uploaded file) ──
+def _build_year_weights(years):
+    """Linear scale 0.40 (oldest) to 2.00 (newest)."""
+    n = len(years)
+    if n == 0: return {}
+    if n == 1: return {years[0]: 1.0}
+    step = 1.6 / (n - 1)
+    return {y: round(0.40 + i * step, 2) for i, y in enumerate(years)}
+
+_CY          = date.today().year
+YEARS        = list(range(_CY - 5, _CY + 1))
+YEAR_WEIGHTS = _build_year_weights(YEARS)
+MONTHS_CURRENT = 4   # fallback — auto-detected from SAP data at runtime
 
 SIGNAL_COLORS = {
     "BUY":   "#28a745",
@@ -97,8 +106,28 @@ def parse_excel(uploaded_file):
     xl       = pd.ExcelFile(uploaded_file)
     sheets   = xl.sheet_names
     data     = {}
-    YEARS    = [2021, 2022, 2023, 2024, 2025, 2026]
-    M26      = 4   # months of 2026 available
+    # ── Auto-detect year range + months from Tubing Sales Order ──
+    _det_years, _det_months = list(range(date.today().year-5, date.today().year+1)), 4
+    for _sh in xl.sheet_names:
+        if any(x in _sh.lower() for x in ['sales order','so-table','tso table']):
+            try:
+                _s  = pd.read_excel(uploaded_file, sheet_name=_sh, header=3, usecols=range(15))
+                _s.columns = _s.columns.str.strip()
+                _dc = next((c for c in _s.columns if 'date' in c.lower()), None)
+                if _dc:
+                    _d = pd.to_datetime(_s[_dc], errors='coerce').dropna()
+                    if not _d.empty:
+                        _miny = int(_d.dt.year.min())
+                        _maxy = int(_d.dt.year.max())
+                        _det_years  = list(range(_miny, _maxy + 1))
+                        _det_months = int(_d[_d.dt.year==_maxy].dt.month.max())
+                        break
+            except Exception:
+                pass
+    YEARS = _det_years
+    M26   = _det_months
+    data['_years']  = YEARS
+    data['_months'] = M26
 
     RAW_SHEETS = {
         'quotation':  ['Tubing Quotation'],
@@ -324,7 +353,10 @@ def build_master(data):
     Build master item table from parsed raw data.
     Adds: material group, order fill rate, lead time weeks.
     """
-    YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+    YEARS        = data.get('_years', list(range(date.today().year-5, date.today().year+1)))
+    MONTHS_CUR   = data.get('_months', 4)
+    CURRENT_YEAR = YEARS[-1]
+    YEAR_WEIGHTS = _build_year_weights(YEARS)
     LEAD_TIME_WEEKS = 25  # Standard lead time per client
 
     def get_source(key, alt_keys=[]):
@@ -394,7 +426,9 @@ def build_master(data):
     master['PricePerLength'] = master['ItemCost'].clip(lower=0)
 
     # ── Lead time ──
-    master['LeadTimeWeeks'] = LEAD_TIME_WEEKS
+    master['LeadTimeWeeks']       = LEAD_TIME_WEEKS
+    master['_current_year']        = CURRENT_YEAR
+    master['_months_current_year'] = MONTHS_CUR
 
     # ── Totals ──
     master['TotalInquiry'] = master[[f'Inq_{y}' for y in YEARS]].sum(axis=1)
@@ -441,14 +475,19 @@ def build_master(data):
 def run_algorithm(master):
     df = master.copy()
 
-    # Weighted average sales
+    # ── Dynamic years from dataframe columns ──
+    YEARS        = sorted(set(int(c.split('_')[1]) for c in df.columns if c.startswith('Sales_') and c.split('_')[1].isdigit()))
+    CY           = YEARS[-1]
+    PY           = YEARS[-2] if len(YEARS) >= 2 else CY - 1
+    YEAR_WEIGHTS = _build_year_weights(YEARS)
+
     df["WeightedAvgSales"] = sum(df[f"Sales_{y}"] * YEAR_WEIGHTS[y] for y in YEARS) / sum(YEAR_WEIGHTS.values())
     df["AvgMonthlySales"]  = df["WeightedAvgSales"] / 12
     df["TotalInquiry"]     = df[[f"Inq_{y}"   for y in YEARS]].sum(axis=1)
     df["TotalSales"]       = df[[f"Sales_{y}" for y in YEARS]].sum(axis=1)
     df["TotalPurchase"]    = df[[f"Purch_{y}" for y in YEARS]].sum(axis=1)
-    df["RecentSales"]      = df["Sales_2025"] + df["Sales_2026"]
-    df["RecentInquiry"]    = df["Inq_2025"]   + df["Inq_2026"]
+    df["RecentSales"]      = df[f"Sales_{CY}"] + df[f"Sales_{PY}"]
+    df["RecentInquiry"]    = df[f"Inq_{CY}"]   + df[f"Inq_{PY}"]
 
     # ── S1: Sales Velocity (35%) ──
     def _s1(row):
@@ -540,17 +579,21 @@ def run_algorithm(master):
 # STEP 4 — TWMAP 6-MONTH FORECAST
 # ─────────────────────────────────────────────────────────────────
 def run_forecast(df):
-    RECENCY = {2021:0.40,2022:0.55,2023:0.70,2024:1.00,2025:1.50,2026:2.00}
     DECAY   = [1.00,0.98,0.96,0.94,0.92,0.90]
+    YEARS   = sorted(set(int(c.split('_')[1]) for c in df.columns if c.startswith('Sales_') and c.split('_')[1].isdigit()))
+    CY      = YEARS[-1]
+    RECENCY = _build_year_weights(YEARS)
+    detected_months = int(df['_months_current_year'].iloc[0]) if '_months_current_year' in df.columns else MONTHS_CURRENT
+    detected_months = max(1, min(detected_months, 12))
 
     records = []
     for _, row in df.iterrows():
         sales = {y: float(row.get(f"Sales_{y}", 0) or 0) for y in YEARS}
         inq   = {y: float(row.get(f"Inq_{y}",   0) or 0) for y in YEARS}
         # Annualise partial 2026
-        if MONTHS_2026 > 0:
-            sales[2026] = sales[2026] * (12.0 / MONTHS_2026)
-            inq[2026]   = inq[2026]   * (12.0 / MONTHS_2026)
+        if detected_months > 0 and detected_months < 12:
+            sales[CY] = sales.get(CY, 0) * (12.0 / detected_months)
+            inq[CY]   = inq.get(CY, 0)   * (12.0 / detected_months)
 
         total_sales = sum(sales.values())
 
@@ -579,8 +622,8 @@ def run_forecast(df):
         base_monthly = base_annual / 12.0
 
         # Trend multiplier
-        recent2 = sales[2025] + sales[2026]
-        prior2  = sales[2023] + sales[2024]
+        recent2 = sales.get(CY,0) + sales.get(CY-1,0)
+        prior2  = sales.get(CY-2,0) + sales.get(CY-3,0)
         if prior2 > 0 and recent2 > 0:
             trend = max(0.50, min(2.00, recent2 / prior2))
         elif recent2 > 0:  trend = 1.20
@@ -589,7 +632,7 @@ def run_forecast(df):
 
         # Inquiry boost
         avg_inq = sum(inq.values()) / 6.0
-        recent_inq = inq[2025] + inq[2026]
+        recent_inq = inq.get(CY,0) + inq.get(CY-1,0)
         inq_boost = max(0.80, min(1.50, (recent_inq/2.0)/(avg_inq+1e-9))) if avg_inq > 0 else 1.0
 
         # Monthly projections
@@ -669,21 +712,23 @@ def apply_decision_matrix(df, months_window=12):
       Low  Q + Low  PO + Low Stock  → DROP     (discontinue or review)
       High Q + Low  PO + High Stock → REVIEW   (defer buying, monitor interest)
     """
-    MONTHS_2026 = 4  # Jan-Apr complete as of May 2026
+    _yc = sorted(set(int(c.split('_')[1]) for c in df.columns if c.startswith('Sales_') and c.split('_')[1].isdigit()))
+    CY  = _yc[-1]
+    PY  = _yc[-2] if len(_yc) >= 2 else CY - 1
+    PY2 = _yc[-3] if len(_yc) >= 3 else CY - 2
+    detected_m = int(df['_months_current_year'].iloc[0]) if '_months_current_year' in df.columns else MONTHS_CURRENT
+    detected_m = max(1, min(detected_m, 12))
 
     df = df.copy()
 
     if months_window == 24:
-        # Past 24 months = 2024 full + 2025 full + 2026 annualised
-        df['Inq_12M']   = df['Inq_2024']   + df['Inq_2025']   + df['Inq_2026']   * (12 / MONTHS_2026)
-        df['Sales_12M'] = df['Sales_2024'] + df['Sales_2025'] + df['Sales_2026'] * (12 / MONTHS_2026)
-        # Normalise to per-12-month equivalent for threshold comparison
+        df['Inq_12M']   = df[f'Inq_{PY2}']   + df[f'Inq_{PY}']   + df[f'Inq_{CY}']   * (12 / detected_m)
+        df['Sales_12M'] = df[f'Sales_{PY2}'] + df[f'Sales_{PY}'] + df[f'Sales_{CY}'] * (12 / detected_m)
         df['Inq_12M']   = df['Inq_12M']   / 2
         df['Sales_12M'] = df['Sales_12M'] / 2
     else:
-        # Past 12 months = 2025 full + 2026 annualised
-        df['Inq_12M']   = df['Inq_2025']   + df['Inq_2026']   * (12 / MONTHS_2026)
-        df['Sales_12M'] = df['Sales_2025'] + df['Sales_2026'] * (12 / MONTHS_2026)
+        df['Inq_12M']   = df[f'Inq_{PY}']   + df[f'Inq_{CY}']   * (12 / detected_m)
+        df['Sales_12M'] = df[f'Sales_{PY}'] + df[f'Sales_{CY}'] * (12 / detected_m)
 
     # Quotation: High = > 100 pcs in past 12 months
     df['Q_High']   = df['Inq_12M'] >= 100
@@ -747,12 +792,9 @@ def apply_abc_xyz(df):
       Uses Swagelok Decision Matrix (Q/PO/Stock signals)
       refined by ABC class for buy intensity
     """
-    YEARS = [2021, 2022, 2023, 2024, 2025, 2026]
+    YEARS   = sorted(set(int(c.split('_')[1]) for c in df.columns if c.startswith('Sales_') and c.split('_')[1].isdigit()))
     df = df.copy()
-
-    # ABC: Composite Value (fix: 751 of 873 items have no price data)
-    # Use real sales value where price exists; inquiry+sales proxy otherwise
-    YEARS_L = [2021, 2022, 2023, 2024, 2025, 2026]
+    YEARS_L = YEARS
     df['TotalValue']    = (df['TotalSales'] * df['PricePerLength'].clip(lower=0)).fillna(0)
     df['TotalInqAll']   = df[[f'Inq_{y}'   for y in YEARS_L]].sum(axis=1)
     df['TotalSalesAll'] = df[[f'Sales_{y}' for y in YEARS_L]].sum(axis=1)
@@ -909,7 +951,8 @@ def compute_summary(df):
                 "inq":   int(df[f"Inq_{yr}"].sum()),
                 "sales": int(df[f"Sales_{yr}"].sum()),
                 "purch": int(df[f"Purch_{yr}"].sum()),
-            } for yr in YEARS
+            } for yr in sorted(set(int(c.split('_')[1]) for c in df.columns
+                                    if c.startswith('Inq_') and c.split('_')[1].isdigit()))
         },
     }
 
